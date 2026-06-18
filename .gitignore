@@ -1,0 +1,47 @@
+# Python 虚拟环境
+venv/
+env/
+.venv/
+
+# 环境变量（包含API密钥，不要提交）
+.env
+
+# Python 编译缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 日志文件
+logs/
+*.jsonl
+*.log
+
+# SQLite 数据库
+workspace/state.sqlite3
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# 运行时生成的任务队列
+workspace/tasks.json
+
+# 用户画像（个人数据）
+workspace/memory/*.md
+
+# 沙盒工作区（运行时生成）
+workspace/
+
+# 打包产物
+*.egg-info/
+dist/
+build/
+
+# IDE 配置
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# pytest 缓存
+.pytest_cache/

@@ -1,0 +1,26 @@
+# NovaMind Core Dependencies
+
+# CLI & Interactive
+typer>=0.9.0
+questionary>=2.0.0
+rich>=13.0.0
+prompt_toolkit>=3.0.0
+
+# Configuration
+python-dotenv>=1.0.0
+
+# LangChain Ecosystem
+langchain-core>=0.2.0
+langchain>=0.2.0
+langchain-openai>=0.1.0
+langchain-anthropic>=0.1.0
+
+# LLM Provider SDKs
+openai>=1.0.0
+anthropic>=0.18.0
+
+# Storage
+# 使用标准库 sqlite3 + threading 实现持久化，无需额外异步依赖
+
+# Data Validation
+pydantic>=2.0.0

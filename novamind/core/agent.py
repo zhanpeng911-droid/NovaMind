@@ -1,0 +1,344 @@
+"""
+NovaMind 智能体组装模块
+
+负责将所有核心组件串联成完整的智能体循环：
+  - 自定义状态机引擎（不依赖LangGraph）
+  - 中间件管道（Token追踪、日志、限流）
+  - 上下文管理（裁剪、摘要、系统提示词）
+  - 工具系统（内置工具 + 动态插件 + MCP服务）
+  - 审计日志
+"""
+from __future__ import annotations
+import asyncio
+import uuid
+from typing import Any
+from langchain_core.messages import (
+    HumanMessage, SystemMessage, AIMessage, ToolMessage, RemoveMessage
+)
+from .state_machine import AgentState, NovaMindAgent, ConversationStore
+from .middleware import MiddlewarePipeline, MiddlewareContext, timing_middleware, logging_middleware
+from .provider import get_provider
+from .tools.builtins import BUILTIN_TOOLS
+from .logger import AuditLogger
+from .token_tracker import TokenTracker
+from .context import ContextManager
+from .plugin_loader import load_dynamic_skills
+from .mcp_adapter import load_mcp_tools
+from .config import MEMORY_DIR, DB_PATH
+import os
+
+
+def _as_int(value: Any) -> int:
+    """Best-effort conversion for provider token usage values."""
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _first_int(source: dict[str, Any], keys: tuple[str, ...]) -> int:
+    for key in keys:
+        value = source.get(key)
+        if value is not None:
+            return _as_int(value)
+    return 0
+
+
+def _extract_token_counts(response: Any) -> tuple[int, int] | None:
+    """
+    Extract prompt/completion token counts from common LangChain response shapes.
+
+    OpenAI-compatible providers usually expose response_metadata["token_usage"].
+    LangChain also normalizes many providers into usage_metadata with
+    input_tokens/output_tokens.
+    """
+    usage_metadata = getattr(response, "usage_metadata", None) or {}
+    response_metadata = getattr(response, "response_metadata", None) or {}
+    token_usage = response_metadata.get("token_usage") or response_metadata.get("usage") or {}
+
+    if not isinstance(usage_metadata, dict):
+        usage_metadata = {}
+    if not isinstance(token_usage, dict):
+        token_usage = {}
+
+    prompt_tokens = (
+        _first_int(usage_metadata, ("input_tokens", "prompt_tokens"))
+        or _first_int(token_usage, ("prompt_tokens", "input_tokens"))
+    )
+    completion_tokens = (
+        _first_int(usage_metadata, ("output_tokens", "completion_tokens"))
+        or _first_int(token_usage, ("completion_tokens", "output_tokens"))
+    )
+
+    if prompt_tokens or completion_tokens:
+        return prompt_tokens, completion_tokens
+    return None
+
+
+def _build_route_function(llm_with_tools):
+    """
+    构建条件路由函数
+
+    根据LLM的回复决定下一步：
+      - 如果有tool_calls -> 路由到tool_node
+      - 如果没有tool_calls -> 结束（__end__）
+    """
+    def route(state: AgentState) -> str:
+        last_msg = state.messages[-1] if state.messages else None
+        if last_msg and isinstance(last_msg, AIMessage) and last_msg.tool_calls:
+            return "tools"
+        return "__end__"
+    return route
+
+
+def create_agent_app(
+    provider_name: str = "openai",
+    model_name: str = "gpt-4o-mini",
+    tools: list | None = None,
+    checkpointer=None,  # 保留兼容性，实际不再使用
+    token_tracker: TokenTracker | None = None,
+    audit_logger: AuditLogger | None = None,
+):
+    """
+    创建NovaMind智能体应用
+
+    这是核心组装函数，将所有组件串联成完整的智能体循环。
+
+    Args:
+        provider_name: LLM提供商名称
+        model_name: 模型标识符
+        tools: 自定义工具列表（None则使用内置+动态插件）
+        checkpointer: 保留兼容性参数（不再使用）
+        token_tracker: Token追踪器实例
+        audit_logger: 审计日志器实例
+
+    Returns:
+        NovaMindAgent 实例
+    """
+    # 初始化核心组件
+    _audit = audit_logger or AuditLogger()
+    _tracker = token_tracker or TokenTracker()
+
+    # 加载工具（内置 + 动态插件 + MCP服务）
+    if tools is None:
+        dynamic_tools = load_dynamic_skills()
+        mcp_tools = load_mcp_tools()
+        actual_tools = BUILTIN_TOOLS + dynamic_tools + mcp_tools
+    else:
+        actual_tools = tools
+
+    # 创建LLM实例
+    llm = get_provider(provider_name=provider_name, model_name=model_name)
+    llm_with_tools = llm.bind_tools(actual_tools)
+
+    # 构建工具名称->工具对象的映射表（用于原生工具执行）
+    tool_map = {t.name: t for t in actual_tools}
+
+    # 创建上下文管理器
+    context_manager = ContextManager(llm=llm)
+
+    # 创建中间件管道
+    pipeline = MiddlewarePipeline()
+    pipeline.add(timing_middleware)
+    pipeline.add(logging_middleware)
+
+    # ==================== 定义agent_node ====================
+    async def agent_node(state: AgentState) -> dict[str, Any]:
+        """
+        核心大脑：读取状态托盘里的历史消息，决定是直接回答，还是调用工具。
+
+        处理流程：
+        1. 读取对话历史
+        2. 记录最近的工具调用结果到审计日志
+        3. 执行上下文裁剪（超过阈值时压缩旧消息为摘要）
+        4. 构建系统提示词（包含用户画像+上下文摘要）
+        5. 调用LLM获取回复
+        6. 记录审计日志和Token用量
+        """
+        thread_id = state.metadata.get("thread_id", "system_default")
+
+        raw_messages = state.messages
+
+        # 记录最近的工具调用结果到审计日志
+        if raw_messages:
+            recent_tool_msgs = []
+            for msg in reversed(raw_messages):
+                if msg.type == "tool":
+                    recent_tool_msgs.append(msg)
+                else:
+                    break
+            for msg in reversed(recent_tool_msgs):
+                _audit.log_event(
+                    thread_id=thread_id,
+                    event="tool_result",
+                    tool=msg.name,
+                    result_summary=msg.content[:200],
+                )
+
+        # 执行上下文裁剪
+        current_summary = state.summary
+        final_msgs, discarded_msgs = context_manager.trim_messages(raw_messages)
+        state_updates: dict[str, Any] = {}
+
+        if discarded_msgs:
+            print("\033[K \033[38;5;141m ● 正在更新上下文记忆... \033[0m")
+            # 摘要生成涉及同步LLM调用，隔离到线程池避免阻塞事件循环
+            new_summary = await asyncio.to_thread(
+                context_manager.generate_summary, current_summary, discarded_msgs
+            )
+            state_updates["summary"] = new_summary
+            # 从状态中删除旧消息
+            delete_cmds = [RemoveMessage(id=m.id) for m in discarded_msgs if m.id]
+            state_updates["messages"] = delete_cmds
+        else:
+            pass  # 无需裁剪
+
+        # 构建发送给LLM的消息列表
+        # 使用本轮新生成的summary（如果有），而不是旧的state.summary
+        effective_summary = state_updates.get("summary", state.summary)
+        msgs_for_llm = context_manager.build_messages_for_llm(
+            final_msgs, effective_summary, agent_name="NovaMind"
+        )
+
+        # 记录LLM输入审计日志
+        _audit.log_event(
+            thread_id=thread_id,
+            event="llm_input",
+            message_count=len(msgs_for_llm),
+        )
+
+        # 通过中间件管道调用LLM
+        ctx = MiddlewareContext(
+            messages=msgs_for_llm,
+            thread_id=thread_id,
+            provider=provider_name,
+            model=model_name,
+        )
+
+        async def _call_llm(mctx: MiddlewareContext):
+            # LLM调用是同步网络IO，隔离到线程池避免阻塞事件循环
+            return await asyncio.to_thread(llm_with_tools.invoke, mctx.messages)
+
+        response = await pipeline.execute(ctx, _call_llm)
+
+        # 为LLM响应消息分配稳定ID，确保裁剪时可被RemoveMessage匹配
+        if not getattr(response, "id", None):
+            response.id = f"msg_{uuid.uuid4().hex[:12]}"
+
+        token_counts = _extract_token_counts(response)
+        if token_counts:
+            prompt_tokens, completion_tokens = token_counts
+            usage = _tracker.record(
+                model=model_name,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                thread_id=thread_id,
+            )
+            state_updates.setdefault("metadata", {})["last_token_usage"] = {
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "total_tokens": usage.total_tokens,
+                "estimated_cost_usd": usage.estimated_cost_usd,
+                "model": usage.model,
+                "timestamp": usage.timestamp,
+            }
+            _audit.log_event(
+                thread_id=thread_id,
+                event="token_usage",
+                model=usage.model,
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+                total_tokens=usage.total_tokens,
+                estimated_cost_usd=usage.estimated_cost_usd,
+            )
+
+        # 记录LLM响应审计日志
+        if response.tool_calls:
+            for tool_call in response.tool_calls:
+                _audit.log_event(
+                    thread_id=thread_id,
+                    event="tool_call",
+                    tool=tool_call["name"],
+                    args=tool_call["args"],
+                )
+        elif response.content:
+            _audit.log_event(
+                thread_id=thread_id,
+                event="ai_message",
+                content=response.content,
+            )
+
+        # 追加LLM响应到状态更新
+        if "messages" not in state_updates:
+            state_updates["messages"] = []
+        state_updates["messages"].append(response)
+
+        return state_updates
+
+    # ==================== 定义tool_node包装（原生实现，不依赖LangGraph） ====================
+    async def tool_executor(state: AgentState) -> dict[str, Any]:
+        """工具执行节点：从最后一条AI消息中提取tool_calls并执行"""
+        last_msg = state.messages[-1] if state.messages else None
+        if not last_msg or not isinstance(last_msg, AIMessage) or not last_msg.tool_calls:
+            return {"messages": []}
+
+        # 原生工具执行：根据tool_calls查找工具并调用
+        tool_messages = []
+        for tc in last_msg.tool_calls:
+            tool_name = tc["name"]
+            tool_args = tc.get("args", {})
+            tool_id = tc.get("id", "")
+
+            if tool_name in tool_map:
+                try:
+                    tool = tool_map[tool_name]
+                    # 工具执行可能涉及IO/网络，隔离到线程池避免阻塞事件循环
+                    result = await asyncio.to_thread(tool.invoke, tool_args)
+                    tool_messages.append(ToolMessage(
+                        content=str(result),
+                        tool_call_id=tool_id,
+                        name=tool_name,
+                        id=f"msg_{uuid.uuid4().hex[:12]}",
+                    ))
+                except Exception as e:
+                    tool_messages.append(ToolMessage(
+                        content=f"工具执行异常: {str(e)}",
+                        tool_call_id=tool_id,
+                        name=tool_name,
+                        id=f"msg_{uuid.uuid4().hex[:12]}",
+                    ))
+            else:
+                tool_messages.append(ToolMessage(
+                    content=f"未找到工具: {tool_name}",
+                    tool_call_id=tool_id,
+                    name=tool_name,
+                    id=f"msg_{uuid.uuid4().hex[:12]}",
+                ))
+
+        return {"messages": tool_messages}
+
+    # ==================== 组装状态机 ====================
+    # 创建对话持久化存储（SQLite）
+    _store = ConversationStore(db_path=DB_PATH)
+
+    agent = NovaMindAgent(
+        audit_logger=_audit,
+        token_tracker=_tracker,
+        context_manager=context_manager,
+        conversation_store=_store,
+    )
+
+    agent.add_node("agent", agent_node, description="LLM推理节点")
+    agent.add_node("tools", tool_executor, description="工具执行节点")
+
+    agent.add_edge("START", "agent")
+    agent.add_conditional_edge(
+        "agent",
+        _build_route_function(llm_with_tools),
+        {"tools": "tools", "__end__": "__end__"},
+    )
+    agent.add_edge("tools", "agent")
+
+    return agent
