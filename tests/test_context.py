@@ -8,6 +8,8 @@ NovaMind 上下文管理器测试
   - 系统消息保留
 """
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from novamind.core.context import ContextManager
 from langchain_core.messages import (
     HumanMessage, AIMessage, SystemMessage, ToolMessage,
@@ -109,6 +111,44 @@ class TestContextManager(unittest.TestCase):
         # 第一条应该是系统消息
         self.assertIsInstance(llm_msgs[0], SystemMessage)
         self.assertIn("上下文", llm_msgs[0].content)
+
+    def test_resolve_context_pack_loads_core_docs(self):
+        """测试结构化 docs 真相源会被解析为 context pack"""
+        with TemporaryDirectory() as tmpdir:
+            docs = Path(tmpdir)
+            (docs / "playbooks").mkdir()
+            (docs / "INDEX.md").write_text("index", encoding="utf-8")
+            (docs / "runtime-overview.md").write_text("runtime", encoding="utf-8")
+            (docs / "sandbox-policy.md").write_text("sandbox", encoding="utf-8")
+            (docs / "tool-contracts.md").write_text("tools", encoding="utf-8")
+            (docs / "session-model.md").write_text("sessions", encoding="utf-8")
+            (docs / "playbooks" / "file-edit.md").write_text("edit playbook", encoding="utf-8")
+
+            self.ctx._docs_dir = tmpdir
+            pack = self.ctx.resolve_context_pack("请帮我修改 README 文件")
+
+            self.assertEqual(pack.name, "runtime-core+file-edit")
+            self.assertEqual(len(pack.documents), 6)
+            self.assertIn("INDEX.md", [doc.path for doc in pack.documents])
+            self.assertIn("playbooks/file-edit.md", [doc.path for doc in pack.documents])
+
+    def test_build_system_prompt_includes_context_pack(self):
+        """测试系统提示词会包含解析后的文档包"""
+        with TemporaryDirectory() as tmpdir:
+            docs = Path(tmpdir)
+            (docs / "INDEX.md").write_text("entry doc", encoding="utf-8")
+            (docs / "runtime-overview.md").write_text("runtime doc", encoding="utf-8")
+            (docs / "sandbox-policy.md").write_text("sandbox doc", encoding="utf-8")
+            (docs / "tool-contracts.md").write_text("tool doc", encoding="utf-8")
+            (docs / "session-model.md").write_text("session doc", encoding="utf-8")
+
+            self.ctx._docs_dir = tmpdir
+            pack = self.ctx.resolve_context_pack("一般问题")
+            prompt = self.ctx.build_system_prompt(summary="测试摘要", context_pack=pack)
+
+            self.assertIn("Structured Context Pack", prompt)
+            self.assertIn("INDEX.md", prompt)
+            self.assertIn("entry doc", prompt)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from .context import ContextManager
 from .plugin_loader import load_dynamic_skills
 from .mcp_adapter import load_mcp_tools
 from .config import MEMORY_DIR, DB_PATH
+from .policy import HarnessPolicy
 import os
 
 
@@ -138,6 +139,7 @@ def create_agent_app(
 
     # 创建上下文管理器
     context_manager = ContextManager(llm=llm)
+    harness_policy = HarnessPolicy.load()
 
     # 创建中间件管道
     pipeline = MiddlewarePipeline()
@@ -198,8 +200,22 @@ def create_agent_app(
         # 构建发送给LLM的消息列表
         # 使用本轮新生成的summary（如果有），而不是旧的state.summary
         effective_summary = state_updates.get("summary", state.summary)
+        latest_user_input = next(
+            (msg.content for msg in reversed(raw_messages) if isinstance(msg, HumanMessage)),
+            "",
+        )
+        context_pack = context_manager.resolve_context_pack(latest_user_input)
+        _audit.log_event(
+            thread_id=thread_id,
+            event="context_pack_loaded",
+            pack=context_pack.name,
+            documents=[doc.path for doc in context_pack.documents],
+        )
         msgs_for_llm = context_manager.build_messages_for_llm(
-            final_msgs, effective_summary, agent_name="NovaMind"
+            final_msgs,
+            effective_summary,
+            agent_name="NovaMind",
+            context_pack=context_pack,
         )
 
         # 记录LLM输入审计日志
@@ -284,12 +300,47 @@ def create_agent_app(
         if not last_msg or not isinstance(last_msg, AIMessage) or not last_msg.tool_calls:
             return {"messages": []}
 
+        thread_id = state.metadata.get("thread_id", "system_default")
+        latest_user_input = next(
+            (msg.content for msg in reversed(state.messages) if isinstance(msg, HumanMessage)),
+            "",
+        )
+
         # 原生工具执行：根据tool_calls查找工具并调用
         tool_messages = []
         for tc in last_msg.tool_calls:
             tool_name = tc["name"]
             tool_args = tc.get("args", {})
             tool_id = tc.get("id", "")
+
+            decision = harness_policy.evaluate_tool_call(
+                tool_name=tool_name,
+                latest_user_input=latest_user_input,
+                tool_args=tool_args,
+            )
+            _audit.log_event(
+                thread_id=thread_id,
+                event="policy_check",
+                **decision.as_log_payload(tool_name),
+            )
+
+            if not decision.allowed:
+                _audit.log_event(
+                    thread_id=thread_id,
+                    event="policy_violation",
+                    **decision.as_log_payload(tool_name),
+                )
+                tool_messages.append(ToolMessage(
+                    content=(
+                        "策略拦截: 当前 Harness Policy 禁止本次工具调用。"
+                        if not decision.requires_confirmation
+                        else "策略拦截: 该操作需要用户明确确认后才能继续。"
+                    ),
+                    tool_call_id=tool_id,
+                    name=tool_name,
+                    id=f"msg_{uuid.uuid4().hex[:12]}",
+                ))
+                continue
 
             if tool_name in tool_map:
                 try:

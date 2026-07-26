@@ -15,11 +15,36 @@ NovaMind 上下文管理器
 from __future__ import annotations
 import os
 import platform
+from dataclasses import dataclass
 from typing import Any
 from langchain_core.messages import (
     BaseMessage, SystemMessage, HumanMessage, RemoveMessage
 )
-from .config import MEMORY_DIR
+from .config import MEMORY_DIR, DOCS_DIR
+
+
+@dataclass(frozen=True)
+class ContextDocument:
+    """Structured document entry exposed to the agent runtime."""
+
+    path: str
+    title: str
+    content: str
+
+
+@dataclass(frozen=True)
+class ContextPack:
+    """Resolved context pack for the current task."""
+
+    name: str
+    documents: tuple[ContextDocument, ...]
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "document_count": len(self.documents),
+            "documents": [doc.path for doc in self.documents],
+        }
 
 
 class ContextManager:
@@ -55,6 +80,73 @@ class ContextManager:
         self._trigger_turns = trigger_turns
         self._keep_turns = keep_turns
         self._summary_max_chars = summary_max_chars
+        self._docs_dir = DOCS_DIR
+
+    @property
+    def docs_dir(self) -> str:
+        return self._docs_dir
+
+    def resolve_context_pack(
+        self,
+        latest_user_input: str = "",
+    ) -> ContextPack:
+        """
+        Resolve a lightweight context pack from the structured docs truth source.
+
+        The first phase keeps selection deliberately simple:
+        - Always load the runtime core pack.
+        - Add a focused playbook when the task appears file-edit heavy.
+        """
+        normalized = (latest_user_input or "").lower()
+
+        core_paths = [
+            "INDEX.md",
+            "runtime-overview.md",
+            "sandbox-policy.md",
+            "tool-contracts.md",
+            "session-model.md",
+        ]
+        playbook_paths: list[str] = []
+        if any(keyword in normalized for keyword in (
+            "file", "files", "文件", "readme", "patch", "edit", "修改", "文档", "docs"
+        )):
+            playbook_paths.append("playbooks/file-edit.md")
+
+        documents = tuple(
+            doc for doc in (
+                self._load_context_document(relative_path)
+                for relative_path in core_paths + playbook_paths
+            )
+            if doc is not None
+        )
+
+        pack_name = "runtime-core+file-edit" if playbook_paths else "runtime-core"
+        return ContextPack(name=pack_name, documents=documents)
+
+    def render_context_pack(self, context_pack: ContextPack | None) -> str:
+        """Render the resolved context pack into a compact prompt section."""
+        if context_pack is None or not context_pack.documents:
+            return ""
+
+        sections = ["【运行时文档包 (Structured Context Pack)】"]
+        for doc in context_pack.documents:
+            sections.append(f"### {doc.title} ({doc.path})\n{doc.content}")
+        return "\n\n".join(sections)
+
+    def _load_context_document(self, relative_path: str) -> ContextDocument | None:
+        doc_path = os.path.join(self._docs_dir, relative_path)
+        if not os.path.exists(doc_path):
+            return None
+
+        with open(doc_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read().strip()
+
+        title = os.path.splitext(os.path.basename(relative_path))[0].replace("-", " ").title()
+        return ContextDocument(
+            path=relative_path.replace("\\", "/"),
+            title=title,
+            content=content,
+        )
 
     def trim_messages(
         self,
@@ -181,6 +273,7 @@ class ContextManager:
         self,
         summary: str = "",
         agent_name: str = "NovaMind",
+        context_pack: ContextPack | None = None,
     ) -> str:
         """
         构建完整的系统提示词
@@ -242,6 +335,10 @@ class ContextManager:
                 "(注：这是系统自动生成的近期沟通摘要，请结合它来理解用户的最新问题)"
             )
 
+        context_pack_text = self.render_context_pack(context_pack)
+        if context_pack_text:
+            prompt += f"\n\n{context_pack_text}"
+
         return prompt
 
     def build_messages_for_llm(
@@ -249,9 +346,10 @@ class ContextManager:
         final_messages: list[BaseMessage],
         summary: str = "",
         agent_name: str = "NovaMind",
+        context_pack: ContextPack | None = None,
     ) -> list[BaseMessage]:
         """构建发送给LLM的完整消息列表（系统提示词 + 对话历史）"""
-        sys_prompt = self.build_system_prompt(summary, agent_name)
+        sys_prompt = self.build_system_prompt(summary, agent_name, context_pack=context_pack)
         msgs = [SystemMessage(content=sys_prompt)] + [
             m for m in final_messages if not isinstance(m, SystemMessage)
         ]

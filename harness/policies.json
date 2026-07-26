@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "default_allowed_tools": [
+    "get_current_time",
+    "calculator",
+    "get_system_model_info",
+    "list_scheduled_tasks",
+    "schedule_task",
+    "delete_scheduled_task",
+    "modify_scheduled_task",
+    "save_user_profile",
+    "list_office_files",
+    "read_office_file",
+    "write_office_file",
+    "execute_office_shell"
+  ],
+  "tool_policies": {
+    "read_office_file": {
+      "mode": "read"
+    },
+    "list_office_files": {
+      "mode": "read"
+    },
+    "write_office_file": {
+      "mode": "write",
+      "confirmation_keywords": [
+        "删除",
+        "批量",
+        "覆盖全部",
+        "rewrite all",
+        "overwrite all"
+      ]
+    },
+    "execute_office_shell": {
+      "mode": "execute",
+      "confirmation_keywords": [
+        "删除",
+        "批量",
+        "覆盖全部",
+        "remove",
+        "delete",
+        "overwrite all"
+      ]
+    }
+  }
+}

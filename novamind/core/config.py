@@ -13,6 +13,9 @@ load_dotenv()
 CORE_DIR = os.path.dirname(os.path.abspath(__file__))
 PACKAGE_DIR = os.path.dirname(CORE_DIR)
 PROJECT_ROOT = os.path.dirname(PACKAGE_DIR)
+DOCS_DIR = os.path.join(PROJECT_ROOT, "docs")
+HARNESS_DIR = os.path.join(PROJECT_ROOT, "harness")
+POLICY_PATH = os.path.join(HARNESS_DIR, "policies.json")
 
 # 工作空间根目录（支持环境变量覆盖）
 WORKSPACE_DIR = os.getenv(
@@ -33,7 +36,7 @@ TASKS_FILE = os.path.join(WORKSPACE_DIR, "tasks.json")        # 定时任务队�
 LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
 
 # 自动创建所有必要目录
-for d in [WORKSPACE_DIR, MEMORY_DIR, PERSONAS_DIR, SCRIPTS_DIR, OFFICE_DIR, SKILLS_DIR, LOG_DIR]:
+for d in [WORKSPACE_DIR, MEMORY_DIR, PERSONAS_DIR, SCRIPTS_DIR, OFFICE_DIR, SKILLS_DIR, LOG_DIR, DOCS_DIR, HARNESS_DIR]:
     os.makedirs(d, exist_ok=True)
 
 # 日志级别配置

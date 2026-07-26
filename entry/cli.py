@@ -16,12 +16,15 @@ import sys
 import typer
 import questionary
 import logging
+import json
+from typing import NoReturn
 from rich.console import Console
 from rich.panel import Panel
 from rich.status import Status
 from dotenv import set_key, load_dotenv, unset_key
 
 from novamind.core.provider import get_provider
+from novamind.core.doctor import run_doctor
 from langchain_core.messages import HumanMessage
 
 ENTRY_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -237,6 +240,47 @@ def run_monitor(
             f"[bold red]启动失败：找不到监视器模块！[/bold red]\n"
             f"[dim]请确保 monitor.py 和 cli.py 在同一目录下。\n报错信息: {e}[/dim]"
         )
+
+
+@app.command("doctor")
+def run_doctor_command(
+    as_json: bool = typer.Option(False, "--json", help="以 JSON 输出检查结果"),
+):
+    """检查 docs、policy、tool 契约和最近日志信号。"""
+    report = run_doctor()
+    counts = report.counts()
+
+    if as_json:
+        console.print_json(data=report.as_dict())
+        if not report.ok:
+            raise typer.Exit(code=1)
+        return
+
+    for finding in report.findings:
+        if finding.level == "error":
+            style = "bold #cc6666"
+            label = "ERROR"
+        elif finding.level == "warning":
+            style = "bold #f0c674"
+            label = "WARN"
+        else:
+            style = "bold #81a2be"
+            label = "INFO"
+        console.print(f"[{style}]{label}[/{style}] {finding.code}: {finding.message}")
+        if finding.suggestion:
+            console.print(f"[dim]  suggestion: {finding.suggestion}[/dim]")
+
+    console.print()
+    console.print(
+        Panel(
+            f"errors={counts['error']} warnings={counts['warning']} info={counts['info']}",
+            title="NovaMind Doctor",
+            border_style="#81a2be" if report.ok else "#f0c674",
+        )
+    )
+
+    if not report.ok:
+        raise typer.Exit(code=1)
 
 
 def main():

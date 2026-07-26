@@ -190,6 +190,9 @@ def render_event(line: str):
         # 事件类型图标
         ICONS = {
             "llm_input": "  ",
+            "context_pack_loaded": "  ",
+            "policy_check": "  ",
+            "policy_violation": "  ",
             "tool_call": "  ",
             "tool_result": "  ",
             "token_usage": "  ",
@@ -205,6 +208,39 @@ def render_event(line: str):
                 f"  [timestamp]{ts}[/timestamp] "
                 f"[llm_input]{icon} NEURON_WAKE  "
                 f"{count} messages sent to model[/llm_input]"
+            )
+
+        elif event == "context_pack_loaded":
+            pack = data.get("pack", "runtime-core")
+            documents = data.get("documents", [])
+            doc_label = ", ".join(documents[:4])
+            if len(documents) > 4:
+                doc_label += ", ..."
+            console.print(
+                f"  [timestamp]{ts}[/timestamp] "
+                f"[llm_input]{icon} CONTEXT      "
+                f"{pack}[/llm_input] "
+                f"[dim]{doc_label}[/dim]"
+            )
+
+        elif event == "policy_check":
+            tool_name = data.get("tool", "unknown")
+            reason = data.get("reason", "unknown")
+            allowed = data.get("allowed", False)
+            console.print(
+                f"  [timestamp]{ts}[/timestamp] "
+                f"[tool_result]{icon} POLICY       "
+                f"{tool_name}[/tool_result] "
+                f"[dim]allowed={allowed} reason={reason}[/dim]"
+            )
+
+        elif event == "policy_violation":
+            tool_name = data.get("tool", "unknown")
+            reason = data.get("reason", "unknown")
+            console.print(
+                f"  [timestamp]{ts}[/timestamp] "
+                f"[error]{icon} POLICY_BLOCK {tool_name}[/error] "
+                f"[dim]{reason}[/dim]"
             )
 
         elif event == "tool_call":

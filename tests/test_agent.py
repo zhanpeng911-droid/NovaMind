@@ -2,6 +2,8 @@
 NovaMind agent assembly helpers tests.
 """
 import asyncio
+import json
+import tempfile
 import unittest
 from dataclasses import dataclass
 from unittest.mock import MagicMock, patch, AsyncMock
@@ -9,6 +11,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 from novamind.core.agent import _extract_token_counts
 from novamind.core.state_machine import AgentState, NovaMindAgent
 from novamind.core.context import ContextManager
+from novamind.core.policy import HarnessPolicy
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 
@@ -106,6 +109,126 @@ class TestAsyncBlockingIsolation(unittest.TestCase):
             self.assertNotEqual(call_thread_id, main_thread_id)
             self.assertEqual(len(result["messages"]), 1)
             self.assertEqual(result["messages"][0].content, "tool_result")
+
+        asyncio.run(_test())
+
+
+class TestAgentContextPackLogging(unittest.TestCase):
+    """测试 agent 会记录 context pack 装载事件"""
+
+    def test_context_pack_event_is_logged(self):
+        async def _test():
+            events = []
+
+            class FakeAuditLogger:
+                def log_event(self, thread_id: str, event: str, **kwargs):
+                    events.append({"thread_id": thread_id, "event": event, **kwargs})
+
+            class FakeLLM:
+                def bind_tools(self, tools):
+                    return self
+
+                def invoke(self, messages):
+                    return AIMessage(content="ok")
+
+            with patch("novamind.core.agent.get_provider", return_value=FakeLLM()), \
+                    patch("novamind.core.agent.load_dynamic_skills", return_value=[]), \
+                    patch("novamind.core.agent.load_mcp_tools", return_value=[]):
+                from novamind.core.agent import create_agent_app
+
+                agent = create_agent_app(
+                    audit_logger=FakeAuditLogger(),
+                    tools=[],
+                )
+                await agent.run("请帮我看看 README 文件", thread_id="ctx_pack_test")
+
+            context_events = [event for event in events if event["event"] == "context_pack_loaded"]
+            self.assertEqual(len(context_events), 1)
+            self.assertEqual(context_events[0]["thread_id"], "ctx_pack_test")
+            self.assertIn("INDEX.md", context_events[0]["documents"])
+
+        asyncio.run(_test())
+
+
+class TestHarnessPolicy(unittest.TestCase):
+    """测试第二期 harness policy 约束层"""
+
+    def test_policy_allows_safe_tool(self):
+        policy = HarnessPolicy.load(policy_path="__missing__.json")
+        decision = policy.evaluate_tool_call("read_office_file", latest_user_input="读取 readme")
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed_by_policy")
+
+    def test_policy_blocks_unknown_tool(self):
+        policy = HarnessPolicy.load(policy_path="__missing__.json")
+        decision = policy.evaluate_tool_call("dangerous_tool", latest_user_input="执行")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "tool_not_allowed_by_policy")
+
+    def test_policy_requires_confirmation_for_destructive_language(self):
+        policy = HarnessPolicy.load(policy_path="__missing__.json")
+        decision = policy.evaluate_tool_call(
+            "write_office_file",
+            latest_user_input="把这个文件覆盖全部并删除旧内容",
+        )
+        self.assertFalse(decision.allowed)
+        self.assertTrue(decision.requires_confirmation)
+        self.assertEqual(decision.reason, "confirmation_required_by_policy")
+
+    def test_policy_loads_custom_json_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            policy_path = tempfile.NamedTemporaryFile(dir=tmpdir, suffix=".json", delete=False).name
+            with open(policy_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "version": 1,
+                    "default_allowed_tools": ["calculator"],
+                    "tool_policies": {},
+                }, f)
+
+            policy = HarnessPolicy.load(policy_path=policy_path)
+            self.assertTrue(policy.evaluate_tool_call("calculator").allowed)
+            self.assertFalse(policy.evaluate_tool_call("read_office_file").allowed)
+
+    def test_tool_executor_emits_policy_violation(self):
+        async def _test():
+            events = []
+            call_count = 0
+
+            class FakeAuditLogger:
+                def log_event(self, thread_id: str, event: str, **kwargs):
+                    events.append({"thread_id": thread_id, "event": event, **kwargs})
+
+            class FakeLLM:
+                def bind_tools(self, tools):
+                    return self
+
+                def invoke(self, messages):
+                    nonlocal call_count
+                    call_count += 1
+                    if call_count == 1:
+                        return AIMessage(
+                            content="",
+                            tool_calls=[{"name": "write_office_file", "args": {"filepath": "a.txt", "content": "x"}, "id": "tc_1"}],
+                        )
+                    return AIMessage(content="收到，当前操作被策略拦截。")
+
+            with patch("novamind.core.agent.get_provider", return_value=FakeLLM()), \
+                    patch("novamind.core.agent.load_dynamic_skills", return_value=[]), \
+                    patch("novamind.core.agent.load_mcp_tools", return_value=[]):
+                from novamind.core.agent import create_agent_app
+
+                agent = create_agent_app(
+                    audit_logger=FakeAuditLogger(),
+                    tools=[],
+                )
+                result = await agent.run("把这个文件覆盖全部并删除旧内容", thread_id="policy_test")
+
+            violation_events = [event for event in events if event["event"] == "policy_violation"]
+            self.assertEqual(len(violation_events), 1)
+            self.assertEqual(violation_events[0]["reason"], "confirmation_required_by_policy")
+            tool_messages = [msg for msg in result.messages if isinstance(msg, ToolMessage)]
+            self.assertTrue(tool_messages)
+            self.assertIn("策略拦截", tool_messages[-1].content)
 
         asyncio.run(_test())
 
