@@ -237,6 +237,38 @@ class TestNovaMindAgent(unittest.TestCase):
 
             result = await agent.run("loop", thread_id="test_3", max_iterations=5)
             self.assertEqual(result.metadata["iteration"], 5)
+            # 达到上限时应设置标记
+            self.assertTrue(result.metadata.get("max_iterations_reached"))
+
+        asyncio.run(_test())
+
+    def test_max_iterations_astream_yields_limit_event(self):
+        """astream 达到迭代上限时应 yield __limit__ 事件"""
+        async def _test():
+            agent = NovaMindAgent()
+
+            async def infinite_agent(state):
+                return {"messages": [AIMessage(content="", tool_calls=[{"name": "x", "args": {}, "id": "t"}])]}
+
+            async def noop_tool(state):
+                return {"messages": [AIMessage(content="loop")]}
+
+            def always_tools(state):
+                return "tools"
+
+            agent.add_node("agent", infinite_agent)
+            agent.add_node("tools", noop_tool)
+            agent.add_edge("START", "agent")
+            agent.add_conditional_edge("agent", always_tools, {"tools": "tools"})
+            agent.add_edge("tools", "agent")
+
+            events = []
+            async for event in agent.astream("loop", thread_id="test_limit", max_iterations=3):
+                events.append(event)
+
+            # 最后一个事件应为 __limit__
+            self.assertIn("__limit__", events[-1])
+            self.assertEqual(events[-1]["__limit__"]["max_iterations"], 3)
 
         asyncio.run(_test())
 

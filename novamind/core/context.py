@@ -14,13 +14,15 @@ NovaMind 上下文管理器
 """
 from __future__ import annotations
 import os
+import json
 import platform
+import re
 from dataclasses import dataclass
 from typing import Any
 from langchain_core.messages import (
     BaseMessage, SystemMessage, HumanMessage, RemoveMessage
 )
-from .config import MEMORY_DIR, DOCS_DIR
+from .config import MEMORY_DIR, DOCS_DIR, PROFILE_PATH
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,7 @@ class ContextManager:
     def __init__(
         self,
         llm=None,
+        evaluator_llm=None,
         trigger_turns: int = 40,
         keep_turns: int = 10,
         summary_max_chars: int = 150,
@@ -72,15 +75,19 @@ class ContextManager:
         """
         Args:
             llm: 用于生成摘要的LLM实例
+            evaluator_llm: 用于二次评估摘要质量的LLM实例（None时回退到llm）
             trigger_turns: 触发裁剪的回合数阈值
             keep_turns: 裁剪后保留的最近回合数
             summary_max_chars: 摘要最大字符数
         """
         self._llm = llm
+        self._evaluator_llm = evaluator_llm  # 可选：独立的评估LLM，None时回退到 self._llm
         self._trigger_turns = trigger_turns
         self._keep_turns = keep_turns
         self._summary_max_chars = summary_max_chars
         self._docs_dir = DOCS_DIR
+        # 最近一次摘要评估结果，供 agent.py 读取后写入审计日志
+        self._last_summary_eval: dict[str, Any] | None = None
 
     @property
     def docs_dir(self) -> str:
@@ -218,6 +225,130 @@ class ContextManager:
 
         return final_messages, discarded_messages
 
+    def _extract_keywords(self, text: str) -> set[str]:
+        """
+        从文本中提取关键词用于摘要质量评估。
+
+        策略：按非字母数字字符分词，保留长度≥2的 token，
+        转小写后去重。中英文混合场景下足够轻量且有效。
+        """
+        tokens = re.split(r"[^\w]+", text)
+        return {t.lower() for t in tokens if len(t) >= 2}
+
+    def _evaluate_summary(
+        self,
+        summary: str,
+        discarded_messages: list[BaseMessage],
+    ) -> dict[str, Any]:
+        """
+        轻量级摘要质量评估。
+
+        评估维度：
+        - keyword_overlap：被丢弃消息的关键词在摘要中的命中率
+        - length：摘要实际字符数
+        - quality：综合评级（good / acceptable / low / empty）
+
+        评级规则：
+        - empty：摘要为空或纯空白
+        - low：关键词重叠率 < 0.3
+        - acceptable：重叠率 0.3~0.6
+        - good：重叠率 ≥ 0.6
+        """
+        stripped = summary.strip() if summary else ""
+        if not stripped:
+            return {
+                "keyword_overlap": 0.0,
+                "length": 0,
+                "quality": "empty",
+            }
+
+        # 提取被丢弃消息的关键词
+        source_text = "\n".join(
+            str(m.content) for m in discarded_messages if m.content
+        )
+        source_keywords = self._extract_keywords(source_text)
+
+        if not source_keywords:
+            overlap = 1.0
+        else:
+            summary_keywords = self._extract_keywords(stripped)
+            hit = len(source_keywords & summary_keywords)
+            overlap = hit / len(source_keywords)
+
+        if overlap < 0.3:
+            quality = "low"
+        elif overlap < 0.6:
+            quality = "acceptable"
+        else:
+            quality = "good"
+
+        return {
+            "keyword_overlap": round(overlap, 3),
+            "length": len(stripped),
+            "quality": quality,
+        }
+
+    def _evaluate_summary_with_llm(
+        self,
+        summary: str,
+        discarded_messages: list[BaseMessage],
+        evaluator,
+    ) -> dict[str, Any] | None:
+        """
+        用 LLM 对摘要进行二次质量评估。
+
+        评估维度：
+        - llm_retention: 信息保留率 (0.0~1.0)，摘要是否保留了旧对话的关键信息
+        - llm_hallucination: 是否编造了原文没有的信息 (bool)
+        - llm_coherence: 连贯性 (0.0~1.0)，摘要是否通顺连贯
+        - llm_verdict: 综合判定 (good / acceptable / low)
+
+        Returns: 评估结果 dict，LLM 返回格式异常时返回 None
+        """
+        source_text = "\n".join(
+            str(m.content) for m in discarded_messages if m.content
+        )
+
+        eval_prompt = (
+            "你是一个摘要质量评估器。请评估以下摘要是否准确概括了原始对话。\n\n"
+            f"【原始对话】\n{source_text}\n\n"
+            f"【生成的摘要】\n{summary}\n\n"
+            "请从三个维度评估，并严格按以下 JSON 格式返回（不要输出任何其他内容）：\n"
+            "{\n"
+            '  "information_retention": 0.0到1.0之间的数字，表示摘要保留了多少关键信息,\n'
+            '  "hallucination": true或false，表示摘要是否编造了原文没有的信息,\n'
+            '  "coherence": 0.0到1.0之间的数字，表示摘要的连贯性和可读性,\n'
+            '  "verdict": "good"或"acceptable"或"low"，综合判定\n'
+            "}"
+        )
+
+        try:
+            from langchain_core.messages import HumanMessage
+            response = evaluator.invoke(
+                [HumanMessage(content=eval_prompt)],
+                config={"callbacks": []},
+            )
+            raw = response.content if response and response.content else ""
+
+            # 尝试从返回中提取 JSON（LLM 可能包裹在 markdown 代码块中）
+            raw = raw.strip()
+            if raw.startswith("```"):
+                # 去掉 markdown 代码块标记
+                lines = raw.split("\n")
+                raw = "\n".join(lines[1:-1]) if lines[-1].strip() == "```" else "\n".join(lines[1:])
+
+            result = json.loads(raw)
+
+            return {
+                "llm_retention": float(result.get("information_retention", 0.0)),
+                "llm_hallucination": bool(result.get("hallucination", False)),
+                "llm_coherence": float(result.get("coherence", 0.0)),
+                "llm_verdict": str(result.get("verdict", "acceptable")),
+            }
+        except (json.JSONDecodeError, ValueError, TypeError, Exception):
+            # LLM 返回格式异常，优雅回退
+            return None
+
     def generate_summary(
         self,
         current_summary: str,
@@ -227,6 +358,7 @@ class ContextManager:
         用LLM将被丢弃的消息压缩为摘要
 
         如果没有LLM实例，返回简单拼接的文本摘要。
+        生成后自动执行轻量级质量评估，结果存入 self._last_summary_eval。
         """
         discarded_text = "\n".join(
             [f"{m.type}: {m.content}" for m in discarded_messages if m.content]
@@ -238,7 +370,9 @@ class ContextManager:
         if self._llm is None:
             # 无LLM时的回退策略：简单截断
             combined = f"{current_summary}\n{discarded_text}"
-            return combined[-self._summary_max_chars:]
+            summary = combined[-self._summary_max_chars:]
+            self._last_summary_eval = self._evaluate_summary(summary, discarded_messages)
+            return summary
 
         summary_prompt = (
             f"你是一个负责维护 AI 工作台上下文的后台模块。\n\n"
@@ -257,11 +391,33 @@ class ContextManager:
             [HumanMessage(content=summary_prompt)],
             config={"callbacks": []},
         )
-        return response.content
+        summary = response.content if response and response.content else ""
+
+        # 空摘要回退：退回到无 LLM 的截断策略
+        if not summary.strip():
+            combined = f"{current_summary}\n{discarded_text}"
+            summary = combined[-self._summary_max_chars:]
+
+        # 强制截断超长摘要（prompt 只是口头要求，这里硬性兜底）
+        hard_limit = int(self._summary_max_chars * 1.5)
+        if len(summary) > hard_limit:
+            summary = summary[:hard_limit]
+
+        # 第一层：词法评估（始终执行，零成本）
+        self._last_summary_eval = self._evaluate_summary(summary, discarded_messages)
+
+        # 第二层：LLM 二次评估（仅在词法评估为 low/acceptable 时触发，避免浪费调用）
+        evaluator = self._evaluator_llm or self._llm
+        if evaluator and self._last_summary_eval["quality"] in ("low", "acceptable"):
+            llm_eval = self._evaluate_summary_with_llm(summary, discarded_messages, evaluator)
+            if llm_eval:
+                self._last_summary_eval.update(llm_eval)
+
+        return summary
 
     def load_user_profile(self) -> str:
         """读取用户长期画像文件"""
-        profile_path = os.path.join(MEMORY_DIR, "user_profile.md")
+        profile_path = PROFILE_PATH
         if os.path.exists(profile_path):
             with open(profile_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read().strip()

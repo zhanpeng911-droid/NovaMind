@@ -194,6 +194,16 @@ def create_agent_app(
             # 从状态中删除旧消息
             delete_cmds = [RemoveMessage(id=m.id) for m in discarded_msgs if m.id]
             state_updates["messages"] = delete_cmds
+
+            # 记录摘要质量评估到审计日志
+            eval_result = context_manager._last_summary_eval
+            if eval_result:
+                _audit.log_event(
+                    thread_id=thread_id,
+                    event="summary_evaluation",
+                    **eval_result,
+                    discarded_message_count=len(discarded_msgs),
+                )
         else:
             pass  # 无需裁剪
 

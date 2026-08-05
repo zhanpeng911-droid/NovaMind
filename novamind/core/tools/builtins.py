@@ -15,8 +15,9 @@ from .base import novamind_tool
 import ast
 import operator
 import os
+import shutil
 import uuid
-from ..config import MEMORY_DIR, TASKS_FILE
+from ..config import MEMORY_DIR, TASKS_FILE, PROFILE_PATH, PROFILE_BACKUP_DIR
 from ..task_store import TASKS_LOCK, load_tasks_unlocked, write_tasks_unlocked
 from .sandbox_tools import (
     list_office_files,
@@ -26,7 +27,8 @@ from .sandbox_tools import (
 )
 
 
-PROFILE_PATH = os.path.join(MEMORY_DIR, "user_profile.md")
+# 画像历史备份保留上限
+MAX_PROFILE_BACKUPS = 10
 
 
 # ==================== AST安全计算器 ====================
@@ -117,6 +119,28 @@ def get_system_model_info() -> str:
     return f"当前使用的模型提供商(Provider)是: {provider}，具体型号(Model)是: {model}。"
 
 
+def _backup_profile_if_exists() -> None:
+    """如果当前画像文件存在，备份到 PROFILE_BACKUP_DIR 并清理超额备份。"""
+    if not os.path.exists(PROFILE_PATH):
+        return
+
+    os.makedirs(PROFILE_BACKUP_DIR, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = os.path.join(PROFILE_BACKUP_DIR, f"user_profile.{timestamp}.md")
+    shutil.copy2(PROFILE_PATH, backup_path)
+
+    # 清理超额备份：按文件名时间戳排序，保留最近 MAX_PROFILE_BACKUPS 份
+    backups = sorted(
+        f for f in os.listdir(PROFILE_BACKUP_DIR)
+        if f.startswith("user_profile.") and f.endswith(".md")
+    )
+    for old_backup in backups[:-MAX_PROFILE_BACKUPS]:
+        try:
+            os.remove(os.path.join(PROFILE_BACKUP_DIR, old_backup))
+        except OSError:
+            pass
+
+
 @novamind_tool
 def save_user_profile(new_content: str) -> str:
     """
@@ -128,8 +152,16 @@ def save_user_profile(new_content: str) -> str:
     注意：此操作将完全覆盖旧文件！请确保传入的是完整的最新档案。
     """
     os.makedirs(MEMORY_DIR, exist_ok=True)
-    with open(PROFILE_PATH, "w", encoding="utf-8") as f:
+
+    # 覆写前备份旧画像（如果存在）
+    _backup_profile_if_exists()
+
+    # 原子写入：先写临时文件，再 os.replace 覆盖目标文件
+    tmp_path = PROFILE_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         f.write(new_content)
+    os.replace(tmp_path, PROFILE_PATH)
+
     return "记忆档案已成功覆写更新。新的人设画像已生效。"
 
 

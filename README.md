@@ -328,6 +328,45 @@ novamind doctor --json
 
 在提交涉及工具、策略、docs 或上下文选择逻辑的改动前，至少运行相关测试和 `novamind doctor`。
 
+### 测试覆盖
+
+当前共 **147 个测试**，覆盖以下维度：
+
+| 测试文件 | 测试数 | 覆盖范围 |
+| --- | --- | --- |
+| `test_agent.py` | 14 | Token 提取、异步线程隔离、Context Pack 日志、Harness Policy 工具拦截、中间件管道、摘要生成线程隔离 |
+| `test_agent_eval.py` | 13 | 单轮/多轮对话、工具调用收敛、工具异常处理、上下文裁剪、摘要即时使用、会话隔离、Provider 错误、沙盒拒绝 |
+| `test_context.py` | 15 | 回合裁剪、系统消息保留、工具消息分组、系统提示词构建、Context Pack 解析、**摘要词法评估**、**LLM 二次评估**（含真实 API 调用） |
+| `test_doctor.py` | 4 | 诊断报告结构、缺失 docs 检测、策略违规扫描 |
+| `test_e2e.py` | 6 | **端到端全链路**：工具调用循环、上下文裁剪+摘要、会话持久化跨重启恢复、策略违规拦截、最大迭代上限、Context Pack 按需加载 |
+| `test_integration.py` | 14 | CLI 会话管理、日志字段对齐、监控发现、SQLite 线程隔离、摘要持久化、端到端 Agent 循环 |
+| `test_logger.py` | 7 | 脱敏递归、密钥截断、**有界队列背压**、**关键事件优先级驱逐**、**double-shutdown 安全** |
+| `test_middleware.py` | 6 | 空管道、单中间件、中间件顺序、计时、日志、限流 |
+| `test_monitor.py` | 10 | 线程 ID 安全化、会话列表、日志目标解析 |
+| `test_plugin_loader.py` | 1 | 技能目录路径解析 |
+| `test_provider.py` | 8 | OpenAI/Anthropic/Ollama Provider 工厂、缺失 Key/包错误、兼容地址覆盖 |
+| `test_sandbox_tools.py` | 3 | Shell 安全命令、解释器逃逸拦截、路径穿越前缀绕过拒绝 |
+| `test_session.py` | 10 | 线程 ID 生成、CLI thread-id 传递、会话隔离、监控目标对齐 |
+| `test_state_machine.py` | 18 | 状态容器、边路由、SQLite 持久化、跨调用状态保持、**最大迭代上限标记 + `__limit__` 事件**、裁剪后消息移除 |
+| `test_token_tracker.py` | 8 | Token 记录、成本估算、会话统计、线程隔离、未知模型默认定价 |
+
+#### 关键测试场景
+
+- **LLM 二次评估摘要**：当词法评估判定摘要质量为 `low` 或 `acceptable` 时，自动触发 LLM 二次评估，从信息保留率、幻觉、连贯性三个维度打分；高质量摘要跳过 LLM 调用节省成本；LLM 返回非 JSON 时优雅回退。
+- **端到端全链路**：通过 `patch` + `FakeLLM` 走真实 `create_agent_app` -> `agent_node` -> `tool_executor` 完整路径，验证消息序列、审计事件、策略拦截、迭代上限、会话持久化等核心行为。
+- **审计日志优先级驱逐**：队列满时按 `critical > normal > low` 三级优先级驱逐，`policy_violation` 等关键事件绝不丢弃；`llm_input` 等低价值事件优先驱逐。
+
+```powershell
+# 运行端到端测试
+python -m pytest tests/test_e2e.py -v
+
+# 运行 LLM 评估测试（需要 .env 中配置真实 API Key）
+python -m pytest tests/test_context.py::TestSummaryLLMEvaluation -v
+
+# 运行审计日志队列测试
+python -m pytest tests/test_logger.py -v
+```
+
 ---
 
 ## 常见问题

@@ -252,6 +252,15 @@ async def async_main(thread_id: str | None = None):
                         elif node_name == "tools":
                             spinner.is_tool_calling = False
 
+                        elif node_name == "__limit__":
+                            spinner.is_spinning = False
+                            limit_info = node_data or {}
+                            max_iter = limit_info.get("max_iterations", "?")
+                            cprint(
+                                f"  {C_WARN}⚠️ 已达到最大循环次数 ({max_iter})，"
+                                f"Agent 可能未完成全部任务{C_RESET}"
+                            )
+
             except Exception as e:
                 spinner.is_spinning = False
                 cprint(f"  {C_ERROR}[ ERROR: {e} ]{C_RESET}")

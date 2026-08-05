@@ -26,6 +26,8 @@ WORKSPACE_DIR = os.getenv(
 # 子目录定义
 DB_PATH = os.path.join(WORKSPACE_DIR, "state.sqlite3")       # 对话状态持久化（短期记忆）
 MEMORY_DIR = os.path.join(WORKSPACE_DIR, "memory")            # 用户画像存储（长期记忆）
+PROFILE_PATH = os.path.join(MEMORY_DIR, "user_profile.md")    # 当前用户画像文件
+PROFILE_BACKUP_DIR = os.path.join(MEMORY_DIR, "profile_backups")  # 画像历史备份目录
 PERSONAS_DIR = os.path.join(WORKSPACE_DIR, "personas")        # 人设模板区
 SCRIPTS_DIR = os.path.join(WORKSPACE_DIR, "scripts")          # 自动化脚本区
 OFFICE_DIR = os.path.join(WORKSPACE_DIR, "office")            # 沙盒工位（唯一允许执行文件操作的空间）
@@ -36,7 +38,7 @@ TASKS_FILE = os.path.join(WORKSPACE_DIR, "tasks.json")        # 定时任务队�
 LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
 
 # 自动创建所有必要目录
-for d in [WORKSPACE_DIR, MEMORY_DIR, PERSONAS_DIR, SCRIPTS_DIR, OFFICE_DIR, SKILLS_DIR, LOG_DIR, DOCS_DIR, HARNESS_DIR]:
+for d in [WORKSPACE_DIR, MEMORY_DIR, PROFILE_BACKUP_DIR, PERSONAS_DIR, SCRIPTS_DIR, OFFICE_DIR, SKILLS_DIR, LOG_DIR, DOCS_DIR, HARNESS_DIR]:
     os.makedirs(d, exist_ok=True)
 
 # 日志级别配置

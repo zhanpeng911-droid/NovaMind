@@ -151,5 +151,172 @@ class TestContextManager(unittest.TestCase):
             self.assertIn("entry doc", prompt)
 
 
+class TestSummaryEvaluation(unittest.TestCase):
+    """测试摘要质量评估逻辑"""
+
+    def setUp(self):
+        self.ctx = ContextManager(trigger_turns=4, keep_turns=2)
+
+    def test_evaluate_good_summary(self):
+        """高质量摘要：关键词重叠率高"""
+        discarded = [
+            HumanMessage(content="discussing Python project architecture design"),
+            AIMessage(content="Python architecture is important"),
+        ]
+        summary = "discussing Python project architecture design"
+        result = self.ctx._evaluate_summary(summary, discarded)
+        self.assertEqual(result["quality"], "good")
+        self.assertGreater(result["keyword_overlap"], 0.6)
+
+    def test_evaluate_low_quality_summary(self):
+        """低质量摘要：关键词几乎不重叠"""
+        discarded = [
+            HumanMessage(content="Python architecture design factory singleton"),
+            AIMessage(content="design patterns are important"),
+        ]
+        summary = "the weather is nice today"
+        result = self.ctx._evaluate_summary(summary, discarded)
+        self.assertEqual(result["quality"], "low")
+        self.assertLess(result["keyword_overlap"], 0.3)
+
+    def test_evaluate_empty_summary(self):
+        """空摘要：标记为 empty"""
+        discarded = [HumanMessage(content="一些内容")]
+        result = self.ctx._evaluate_summary("", discarded)
+        self.assertEqual(result["quality"], "empty")
+        self.assertEqual(result["length"], 0)
+
+    def test_generate_summary_no_llm_sets_eval(self):
+        """无 LLM 时 generate_summary 也应设置评估结果"""
+        discarded = [
+            HumanMessage(content="讨论 Python 架构"),
+            AIMessage(content="架构设计很重要"),
+        ]
+        summary = self.ctx.generate_summary("", discarded)
+        self.assertIsNotNone(self.ctx._last_summary_eval)
+        self.assertIn("quality", self.ctx._last_summary_eval)
+
+    def test_generate_summary_llm_empty_fallback(self):
+        """LLM 返回空摘要时回退到截断策略"""
+        class FakeEmptyLLM:
+            def invoke(self, messages, config=None):
+                class Resp:
+                    content = ""
+                return Resp()
+
+        ctx = ContextManager(llm=FakeEmptyLLM(), trigger_turns=4, keep_turns=2)
+        discarded = [HumanMessage(content="讨论内容"), AIMessage(content="回复内容")]
+        summary = ctx.generate_summary("", discarded)
+        # 回退后摘要非空
+        self.assertTrue(summary.strip())
+        self.assertIsNotNone(ctx._last_summary_eval)
+
+    def test_generate_summary_llm_truncates_oversized(self):
+        """LLM 返回超长摘要时强制截断"""
+        class FakeLongLLM:
+            def invoke(self, messages, config=None):
+                class Resp:
+                    content = "x" * 500  # 远超 summary_max_chars * 1.5
+                return Resp()
+
+        ctx = ContextManager(
+            llm=FakeLongLLM(), trigger_turns=4, keep_turns=2, summary_max_chars=50
+        )
+        discarded = [HumanMessage(content="讨论"), AIMessage(content="回复")]
+        summary = ctx.generate_summary("", discarded)
+        # 截断后不超过 50 * 1.5 = 75 字符
+        self.assertLessEqual(len(summary), 75)
+
+
+class TestSummaryLLMEvaluation(unittest.TestCase):
+    """测试 LLM 二次评估摘要质量（使用真实 DeepSeek API）"""
+
+    @classmethod
+    def setUpClass(cls):
+        """初始化真实 LLM 实例"""
+        import os
+        from dotenv import load_dotenv
+        load_dotenv()
+
+        api_key = os.getenv("OPENAI_API_KEY")
+        base_url = os.getenv("OPENAI_API_BASE")
+        model = os.getenv("DEFAULT_MODEL")
+
+        if not api_key or not model:
+            raise unittest.SkipTest("缺少 API Key 或模型配置，跳过 LLM 评估测试")
+
+        from langchain_openai import ChatOpenAI
+        cls.llm = ChatOpenAI(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            temperature=0,
+        )
+
+    def test_llm_eval_triggers_on_low_quality(self):
+        """低质量摘要应触发 LLM 二次评估，结果含 llm_retention 字段"""
+        # 构造一个明显低质量的摘要（跟原文毫无关系）
+        discarded = [
+            HumanMessage(content="We discussed Python project architecture design patterns"),
+            AIMessage(content="The architecture uses factory and singleton patterns for modularity"),
+        ]
+        summary = "The weather is nice today and I like pizza."
+
+        ctx = ContextManager(llm=self.llm, trigger_turns=4, keep_turns=2)
+        # 先做词法评估（应为 low）
+        lexical = ctx._evaluate_summary(summary, discarded)
+        self.assertEqual(lexical["quality"], "low")
+
+        # 触发 LLM 评估
+        llm_eval = ctx._evaluate_summary_with_llm(summary, discarded, self.llm)
+        self.assertIsNotNone(llm_eval)
+        self.assertIn("llm_retention", llm_eval)
+        self.assertIn("llm_hallucination", llm_eval)
+        self.assertIn("llm_coherence", llm_eval)
+        self.assertIn("llm_verdict", llm_eval)
+        # 低质量摘要的 retention 应该很低
+        self.assertLess(llm_eval["llm_retention"], 0.5)
+
+    def test_llm_eval_skipped_on_good_quality(self):
+        """高质量摘要不应触发 LLM 评估（在 generate_summary 中跳过）"""
+        # 构造一个高质量摘要
+        discarded = [
+            HumanMessage(content="discussing Python project architecture design"),
+            AIMessage(content="Python architecture is important for modularity"),
+        ]
+        summary = "discussing Python project architecture design modularity"
+
+        ctx = ContextManager(llm=self.llm, trigger_turns=4, keep_turns=2)
+        # 词法评估应为 good
+        lexical = ctx._evaluate_summary(summary, discarded)
+        self.assertEqual(lexical["quality"], "good")
+
+        # generate_summary 应跳过 LLM 评估（quality == good）
+        # 用 FakeLLM 返回高质量摘要来验证完整流程
+        class FakeGoodLLM:
+            def invoke(self, messages, config=None):
+                class Resp:
+                    content = summary
+                return Resp()
+
+        ctx2 = ContextManager(llm=FakeGoodLLM(), trigger_turns=4, keep_turns=2)
+        ctx2.generate_summary("", discarded)
+        # 不应含 LLM 评估字段
+        self.assertNotIn("llm_retention", ctx2._last_summary_eval)
+
+    def test_llm_eval_handles_malformed_response(self):
+        """LLM 返回非 JSON 时应优雅回退，返回 None"""
+        class FakeMalformedLLM:
+            def invoke(self, messages, config=None):
+                class Resp:
+                    content = "这不是JSON格式的回复，我无法评估"
+                return Resp()
+
+        ctx = ContextManager(llm=FakeMalformedLLM(), trigger_turns=4, keep_turns=2)
+        discarded = [HumanMessage(content="some content")]
+        result = ctx._evaluate_summary_with_llm("summary", discarded, FakeMalformedLLM())
+        self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()

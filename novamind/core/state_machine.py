@@ -454,6 +454,17 @@ class NovaMindAgent:
 
         state.metadata["visited_edges"] = visited_edges
 
+        # 检查是否因达到最大迭代次数而退出
+        if state.metadata["iteration"] >= max_iterations:
+            state.metadata["max_iterations_reached"] = True
+            if self._logger:
+                self._logger.log_event(
+                    thread_id=thread_id,
+                    event="system_action",
+                    action=f"达到最大迭代次数 {max_iterations}，智能体循环终止",
+                    iteration=state.metadata["iteration"],
+                )
+
         # 持久化到数据库
         self._persist_state(thread_id, state)
 
@@ -511,6 +522,22 @@ class NovaMindAgent:
             next_node = edge.resolve(state)
             visited_edges.append(f"{current}->{next_node}")
             current = next_node
+
+        # 检查是否因达到最大迭代次数而退出
+        if state.metadata["iteration"] >= max_iterations:
+            state.metadata["max_iterations_reached"] = True
+            if self._logger:
+                self._logger.log_event(
+                    thread_id=thread_id,
+                    event="system_action",
+                    action=f"达到最大迭代次数 {max_iterations}，智能体循环终止",
+                    iteration=state.metadata["iteration"],
+                )
+            # 通知消费者：因迭代上限终止
+            yield {"__limit__": {
+                "max_iterations": max_iterations,
+                "iteration": state.metadata["iteration"],
+            }}
 
         # 流式执行结束后持久化
         state.metadata["visited_edges"] = visited_edges
