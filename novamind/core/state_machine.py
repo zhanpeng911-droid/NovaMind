@@ -24,6 +24,7 @@ from langchain_core.messages import (
 from .logger import AuditLogger
 from .token_tracker import TokenTracker
 from .context import ContextManager
+from .middlewares import MiddlewareContext, MiddlewareManager
 
 
 @dataclass
@@ -221,6 +222,42 @@ class ConversationStore:
             finally:
                 conn.close()
 
+    def list_threads(self) -> list[dict]:
+        """列出所有会话：thread_id + 标题（首条 user 消息）+ 消息数 + 最近时间。"""
+        import sqlite3
+        with self._lock:
+            conn = sqlite3.connect(self._db_path)
+            try:
+                rows = conn.execute(
+                    """SELECT thread_id, COUNT(*) as cnt, MAX(timestamp) as last_ts
+                       FROM conversations
+                       GROUP BY thread_id
+                       ORDER BY last_ts DESC"""
+                ).fetchall()
+                result = []
+                for row in rows:
+                    thread_id, cnt, last_ts = row
+                    first = conn.execute(
+                        "SELECT content FROM conversations WHERE thread_id=? AND role='human' ORDER BY id ASC LIMIT 1",
+                        (thread_id,),
+                    ).fetchone()
+                    title = (first[0][:24] if first else "新对话")
+                    result.append({
+                        "thread_id": thread_id,
+                        "title": title,
+                        "message_count": cnt,
+                        "last_ts": str(last_ts),
+                    })
+                return result
+            finally:
+                conn.close()
+
+    def close(self) -> None:
+        """显式关闭（当前无持久连接，保留接口 + 触发 gc 释放句柄）。"""
+        import gc
+
+        gc.collect()
+
 
 # 节点函数类型：接收状态，返回状态更新字典
 NodeFunc = Callable[[AgentState], Awaitable[dict[str, Any]]]
@@ -299,6 +336,7 @@ class NovaMindAgent:
         token_tracker: TokenTracker | None = None,
         context_manager: ContextManager | None = None,
         conversation_store: ConversationStore | None = None,
+        middleware_manager: MiddlewareManager | None = None,
     ):
         self._nodes: dict[str, Node] = {}
         self._edges: list[Edge] = []
@@ -306,11 +344,32 @@ class NovaMindAgent:
         self._token_tracker = token_tracker
         self._context_manager = context_manager
         self._store = conversation_store
+        self._middleware_manager = middleware_manager or MiddlewareManager()
 
         # 状态在Agent级别维护：跨run/astream调用保持对话连贯
         self._states: dict[str, AgentState] = {}
         # 持久化计数器：记录每个线程已保存的消息数量，避免全量加载
         self._persisted_counts: dict[str, int] = {}
+
+    @property
+    def middleware_manager(self) -> MiddlewareManager:
+        return self._middleware_manager
+
+    @property
+    def conversation_store(self) -> ConversationStore | None:
+        return self._store
+
+    async def _dispatch_hook(self, hook: str, state: AgentState, thread_id: str) -> None:
+        """分发中间件钩子并把结果应用到 state（before/after_agent 用）。"""
+        from .middlewares import MiddlewareResult
+
+        result = await self._middleware_manager.dispatch(
+            hook,
+            MiddlewareContext(state=state, thread_id=thread_id),
+        )
+        if result is None or result.is_empty():
+            return
+        _apply_result(state, result)
 
     def _get_or_create_state(self, thread_id: str) -> AgentState:
         """
@@ -417,6 +476,9 @@ class NovaMindAgent:
         self._mark_pending_persist(state, [user_msg])
         state.metadata["iteration"] = 0
 
+        # 分发 before_agent 钩子（记忆预载 / 沙箱恢复等横切关注点）
+        await self._dispatch_hook("before_agent", state, thread_id)
+
         current = "agent"
         visited_edges: list[str] = []
 
@@ -465,6 +527,9 @@ class NovaMindAgent:
                     iteration=state.metadata["iteration"],
                 )
 
+        # 分发 after_agent 钩子（报告合成 / 反思等收尾关注点）
+        await self._dispatch_hook("after_agent", state, thread_id)
+
         # 持久化到数据库
         self._persist_state(thread_id, state)
 
@@ -486,6 +551,9 @@ class NovaMindAgent:
         state.add_message(user_msg)
         self._mark_pending_persist(state, [user_msg])
         state.metadata["iteration"] = 0
+
+        # 分发 before_agent 钩子
+        await self._dispatch_hook("before_agent", state, thread_id)
 
         current = "agent"
         visited_edges: list[str] = []
@@ -539,6 +607,9 @@ class NovaMindAgent:
                 "iteration": state.metadata["iteration"],
             }}
 
+        # 分发 after_agent 钩子
+        await self._dispatch_hook("after_agent", state, thread_id)
+
         # 流式执行结束后持久化
         state.metadata["visited_edges"] = visited_edges
         self._persist_state(thread_id, state)
@@ -549,3 +620,19 @@ class NovaMindAgent:
         self._persisted_counts.pop(thread_id, None)
         if self._store:
             self._store.clear_thread(thread_id)
+
+
+def _apply_result(state: AgentState, result) -> None:
+    """把 MiddlewareResult 应用到 AgentState（state_patch + messages_patch）。"""
+    from .middlewares import MiddlewareResult
+
+    if result.state_patch:
+        for key, value in result.state_patch.items():
+            if key == "metadata":
+                state.metadata.update(value)
+            elif key == "messages":
+                state.add_messages([m for m in value if not isinstance(m, RemoveMessage)])
+            else:
+                setattr(state, key, value)
+    if result.messages_patch:
+        state.add_messages(result.messages_patch)

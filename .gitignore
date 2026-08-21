@@ -46,3 +46,6 @@ build/
 # pytest 缓存
 .pytest_cache/
 .zcode/
+
+# 内部 agent 工作目录（会话记忆，不公开）
+.workbuddy/

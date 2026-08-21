@@ -73,6 +73,7 @@ def run_doctor() -> DoctorReport:
     findings.extend(_check_policy_file())
     findings.extend(_check_policy_tool_coverage())
     findings.extend(_check_recent_policy_violations())
+    findings.extend(_check_architecture_modules())
     if not findings:
         findings.append(DoctorFinding(
             "info",
@@ -81,6 +82,51 @@ def run_doctor() -> DoctorReport:
             "Keep docs, policies, and logs under review as the tool surface evolves.",
         ))
     return DoctorReport(findings=tuple(findings))
+
+
+def _check_architecture_modules() -> list[DoctorFinding]:
+    """架构健康体检：检查 P0-P5 各模块可 import + 内置技能可发现。
+
+    这些是 warning/info 级检查，模块缺失不阻断（error 级只保留结构性缺陷）。
+    """
+    findings: list[DoctorFinding] = []
+
+    modules = [
+        ("llm", "novamind.core.llm"),
+        ("middlewares", "novamind.core.middlewares"),
+        ("memory", "novamind.core.memory"),
+        ("sandbox", "novamind.core.sandbox"),
+        ("context_engineering", "novamind.core.context_engineering"),
+        ("skill", "novamind.core.skill"),
+        ("multiagent", "novamind.core.multiagent"),
+    ]
+    for label, mod_path in modules:
+        try:
+            __import__(mod_path)
+        except Exception as exc:
+            findings.append(DoctorFinding(
+                "warning",
+                f"module_import_failed_{label}",
+                f"Architecture module '{label}' failed to import: {exc}",
+                f"Check {mod_path} for import errors.",
+            ))
+
+    # 内置技能发现检查
+    try:
+        from pathlib import Path
+
+        builtin_dir = Path(__file__).resolve().parent / "skill" / "builtin_skills"
+        if not builtin_dir.exists():
+            findings.append(DoctorFinding(
+                "warning",
+                "missing_builtin_skills",
+                "Builtin skills directory not found.",
+                "Restore novamind/core/skill/builtin_skills/.",
+            ))
+    except Exception:
+        pass
+
+    return findings
 
 
 def _check_required_docs() -> list[DoctorFinding]:

@@ -30,6 +30,7 @@ from prompt_toolkit.application import get_app
 from novamind.core.agent import create_agent_app
 from novamind.core.event_bus import event_bus
 from novamind.core.heartbeat import pacemaker_loop
+from novamind.core.skill.evolution.flag import evolution_notice
 
 
 # ==================== 终端颜色常量 ====================
@@ -133,6 +134,11 @@ def generate_thread_id() -> str:
 async def async_main(thread_id: str | None = None):
     """NovaMind 异步主循环"""
     print_banner()
+
+    # bootstrap 提醒：技能/多 Agent 进化 L2/L3 默认关闭（决策 3）
+    notice = evolution_notice()
+    if notice:
+        cprint(f"  {C_DIM}ℹ {notice}{C_RESET}")
 
     from dotenv import load_dotenv
     env_path = os.path.join(

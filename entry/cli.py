@@ -226,6 +226,41 @@ def run_agent(
     novamind_main.main(thread_id=thread_id)
 
 
+@app.command("gui")
+def run_gui_command(
+    port: int = typer.Option(8765, "--port", "-p", help="后端监听端口"),
+):
+    """启动NovaMind桌面图形界面（pywebview 窗口）"""
+    load_dotenv(ENV_PATH)
+    provider = os.getenv("DEFAULT_PROVIDER")
+    model = os.getenv("DEFAULT_MODEL")
+    if not provider or not model:
+        _show_boot_error()
+        raise typer.Exit()
+    if provider != "ollama":
+        if provider in ["openai", "aliyun", "z.ai", "tencent", "other"]:
+            if not os.getenv("OPENAI_API_KEY"):
+                _show_boot_error()
+                raise typer.Exit()
+        elif provider == "anthropic":
+            if not os.getenv("ANTHROPIC_API_KEY"):
+                _show_boot_error()
+                raise typer.Exit()
+
+    try:
+        import webview  # noqa: F401
+    except ImportError:
+        console.print(
+            f"[bold red]启动失败：缺少 pywebview 依赖！[/bold red]\n"
+            f"[dim]请运行 pip install pywebview 后重试。[/dim]"
+        )
+        raise typer.Exit(code=1)
+
+    from novamind.webui.app import run_gui
+
+    run_gui(port=port)
+
+
 @app.command("monitor")
 def run_monitor(
     thread_id: str = typer.Option(None, "--thread-id", "-t", help="指定监控的会话 ID"),

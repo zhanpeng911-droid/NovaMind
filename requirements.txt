@@ -6,6 +6,14 @@ questionary>=2.0.0
 rich>=13.0.0
 prompt_toolkit>=3.0.0
 
+# Chinese tokenization (记忆检索中文分词，缺失时回退空格分词)
+jieba>=0.42.0
+
+# WebUI 桌面窗口（novamind gui）
+fastapi>=0.100.0
+uvicorn>=0.20.0
+pywebview>=5.0
+
 # Configuration
 python-dotenv>=1.0.0
 

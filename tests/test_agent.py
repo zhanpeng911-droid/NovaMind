@@ -128,7 +128,7 @@ class TestAgentContextPackLogging(unittest.TestCase):
                 def bind_tools(self, tools):
                     return self
 
-                def invoke(self, messages):
+                def invoke(self, messages, **kwargs):
                     return AIMessage(content="ok")
 
             with patch("novamind.core.agent.get_provider", return_value=FakeLLM()), \
@@ -202,7 +202,7 @@ class TestHarnessPolicy(unittest.TestCase):
                 def bind_tools(self, tools):
                     return self
 
-                def invoke(self, messages):
+                def invoke(self, messages, **kwargs):
                     nonlocal call_count
                     call_count += 1
                     if call_count == 1:

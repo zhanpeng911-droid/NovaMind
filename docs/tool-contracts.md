@@ -4,11 +4,16 @@ Builtin tools are capability contracts, not suggestions.
 
 Current core groups:
 
-- Time and system info.
+- Time and system info (current time, system model info).
 - Safe arithmetic.
-- User profile persistence.
-- Scheduled task management.
-- Sandbox file inspection and controlled shell execution.
+- User profile persistence (bridged into long-term procedural memory).
+- Scheduled task management (create, list, delete, modify).
+- Sandbox file inspection and controlled shell execution, confined to the office workspace.
+
+Additional tool surfaces:
+
+- Dynamic skill tools loaded from the skill registry at startup.
+- MCP tools loaded from configured MCP servers.
 
 Tool usage rules:
 

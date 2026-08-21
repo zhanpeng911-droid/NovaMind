@@ -162,6 +162,17 @@ def save_user_profile(new_content: str) -> str:
         f.write(new_content)
     os.replace(tmp_path, PROFILE_PATH)
 
+    # 桥接五层记忆：画像同时写入 procedural 记忆（若记忆 provider 已启用，否则静默降级）
+    try:
+        from ..memory.bootstrap import get_memory_provider
+        from ..memory.persona import save_persona_to_memory
+
+        provider = get_memory_provider()
+        if provider is not None:
+            save_persona_to_memory(provider.manager(), new_content, source="save_user_profile")
+    except Exception:
+        pass
+
     return "记忆档案已成功覆写更新。新的人设画像已生效。"
 
 

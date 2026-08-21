@@ -14,6 +14,9 @@
     "write_office_file",
     "execute_office_shell"
   ],
+  "delegate_tool_prefixes": [
+    "delegate_to_"
+  ],
   "tool_policies": {
     "read_office_file": {
       "mode": "read"

@@ -17,6 +17,10 @@ from langchain_core.messages import (
 )
 from .state_machine import AgentState, NovaMindAgent, ConversationStore
 from .middleware import MiddlewarePipeline, MiddlewareContext, timing_middleware, logging_middleware
+from .middlewares import MiddlewareManager
+from .middlewares import MiddlewareContext as HookContext
+from .middlewares.orchestration_middleware import OrchestrationMiddleware
+from .multiagent.bootstrap import build_delegate_tools
 from .provider import get_provider
 from .tools.builtins import BUILTIN_TOOLS
 from .logger import AuditLogger
@@ -94,6 +98,15 @@ def _build_route_function(llm_with_tools):
     return route
 
 
+def _merge_hook_state_patch(state_updates: dict, state_patch: dict) -> None:
+    """把横切中间件返回的 state_patch 合并进 state_updates（metadata 特殊处理）。"""
+    for k, v in state_patch.items():
+        if k == "metadata":
+            state_updates.setdefault("metadata", {}).update(v)
+        else:
+            state_updates[k] = v
+
+
 def create_agent_app(
     provider_name: str = "openai",
     model_name: str = "gpt-4o-mini",
@@ -101,6 +114,8 @@ def create_agent_app(
     checkpointer=None,  # 保留兼容性，实际不再使用
     token_tracker: TokenTracker | None = None,
     audit_logger: AuditLogger | None = None,
+    middlewares: list | None = None,
+    model_router=None,
 ):
     """
     创建NovaMind智能体应用
@@ -110,10 +125,12 @@ def create_agent_app(
     Args:
         provider_name: LLM提供商名称
         model_name: 模型标识符
-        tools: 自定义工具列表（None则使用内置+动态插件）
+        tools: 自定义工具列表（None则使用内置+动态插件+MCP+多Agent委派，pi 可用时）
         checkpointer: 保留兼容性参数（不再使用）
         token_tracker: Token追踪器实例
         audit_logger: 审计日志器实例
+        middlewares: 横切中间件列表（None则使用默认空管道，保持向后兼容）
+        model_router: 可选 ModelRouter（提供则走 FallbackChatModel 链式降级）
 
     Returns:
         NovaMindAgent 实例
@@ -122,16 +139,31 @@ def create_agent_app(
     _audit = audit_logger or AuditLogger()
     _tracker = token_tracker or TokenTracker()
 
-    # 加载工具（内置 + 动态插件 + MCP服务）
+    # 横切中间件管理器（P0 接线：before/after_model、wrap_tool_call）
+    _middleware_manager = MiddlewareManager(middlewares)
+
+    # 加载工具（内置 + 动态插件 + MCP服务 + 多 Agent 委派）
+    delegate_tools: list = []
     if tools is None:
         dynamic_tools = load_dynamic_skills()
         mcp_tools = load_mcp_tools()
-        actual_tools = BUILTIN_TOOLS + dynamic_tools + mcp_tools
+        delegate_tools = build_delegate_tools()
+        actual_tools = BUILTIN_TOOLS + dynamic_tools + mcp_tools + delegate_tools
     else:
         actual_tools = tools
 
-    # 创建LLM实例
-    llm = get_provider(provider_name=provider_name, model_name=model_name)
+    # 多 Agent 接线：委派工具存在时自动挂 OrchestrationMiddleware
+    # （set_current_state 共享沙箱透传 + delegate_to_* 打点），调用方已给则不重复
+    if delegate_tools and not any(
+        isinstance(mw, OrchestrationMiddleware) for mw in _middleware_manager.middlewares
+    ):
+        _middleware_manager.add(OrchestrationMiddleware())
+
+    # 创建LLM实例（model_router 提供时走链式降级，否则走旧工厂保持兼容）
+    if model_router is not None:
+        llm = model_router.build_model("researcher")
+    else:
+        llm = get_provider(provider_name=provider_name, model_name=model_name)
     llm_with_tools = llm.bind_tools(actual_tools)
 
     # 构建工具名称->工具对象的映射表（用于原生工具执行）
@@ -235,6 +267,15 @@ def create_agent_app(
             message_count=len(msgs_for_llm),
         )
 
+        # 横切中间件：before_model 钩子（记忆召回 L4 / 上下文治理 P3 / 技能注入）
+        hook_ctx = HookContext(state=state, thread_id=thread_id, messages=msgs_for_llm)
+        before_result = await _middleware_manager.dispatch("before_model", hook_ctx)
+        if before_result is not None:
+            if before_result.state_patch:
+                _merge_hook_state_patch(state_updates, before_result.state_patch)
+            if before_result.messages_patch:
+                msgs_for_llm = list(msgs_for_llm) + list(before_result.messages_patch)
+
         # 通过中间件管道调用LLM
         ctx = MiddlewareContext(
             messages=msgs_for_llm,
@@ -248,6 +289,15 @@ def create_agent_app(
             return await asyncio.to_thread(llm_with_tools.invoke, mctx.messages)
 
         response = await pipeline.execute(ctx, _call_llm)
+
+        # 横切中间件：after_model 钩子（预算追踪 / P5 熔断 / 记忆沉淀 L5）
+        after_ctx = HookContext(state=state, thread_id=thread_id, messages=msgs_for_llm)
+        after_result = await _middleware_manager.dispatch("after_model", after_ctx)
+        if after_result is not None:
+            if after_result.state_patch:
+                _merge_hook_state_patch(state_updates, after_result.state_patch)
+            if after_result.messages_patch:
+                state_updates.setdefault("messages", []).extend(after_result.messages_patch)
 
         # 为LLM响应消息分配稳定ID，确保裁剪时可被RemoveMessage匹配
         if not getattr(response, "id", None):
@@ -352,6 +402,21 @@ def create_agent_app(
                 ))
                 continue
 
+            # 横切中间件：wrap_tool_call 钩子（沙箱校验 / 多Agent打点 / 工具结果外化）
+            hook_ctx = HookContext(
+                state=state, thread_id=thread_id,
+                tool_call={"name": tool_name, "args": tool_args, "id": tool_id},
+            )
+            wrap_result = await _middleware_manager.dispatch("wrap_tool_call", hook_ctx)
+            if wrap_result is not None and wrap_result.override is not None:
+                tool_messages.append(ToolMessage(
+                    content=str(wrap_result.override),
+                    tool_call_id=tool_id,
+                    name=tool_name,
+                    id=f"msg_{uuid.uuid4().hex[:12]}",
+                ))
+                continue
+
             if tool_name in tool_map:
                 try:
                     tool = tool_map[tool_name]
@@ -389,6 +454,7 @@ def create_agent_app(
         token_tracker=_tracker,
         context_manager=context_manager,
         conversation_store=_store,
+        middleware_manager=_middleware_manager,
     )
 
     agent.add_node("agent", agent_node, description="LLM推理节点")

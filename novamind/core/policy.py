@@ -44,6 +44,9 @@ DEFAULT_POLICY: dict[str, Any] = {
             "confirmation_keywords": ["删除", "批量", "覆盖全部", "remove", "delete", "overwrite all"],
         },
     },
+    # 多 Agent 委派工具按前缀放行（delegate_to_<name> 动态生成，无法逐个枚举）。
+    # 移除该前缀即可在策略层整体关闭委派。
+    "delegate_tool_prefixes": ["delegate_to_"],
 }
 
 
@@ -67,6 +70,7 @@ class HarnessPolicy:
         self._raw = raw_policy
         self._default_allowed_tools = set(raw_policy.get("default_allowed_tools", []))
         self._tool_policies = raw_policy.get("tool_policies", {})
+        self._delegate_prefixes = tuple(raw_policy.get("delegate_tool_prefixes", []))
 
     @classmethod
     def load(cls, policy_path: str = POLICY_PATH) -> "HarnessPolicy":
@@ -84,7 +88,9 @@ class HarnessPolicy:
         tool_args: dict[str, Any] | None = None,
     ) -> PolicyDecision:
         tool_args = tool_args or {}
-        if tool_name not in self._default_allowed_tools:
+        if tool_name not in self._default_allowed_tools and not any(
+            tool_name.startswith(prefix) for prefix in self._delegate_prefixes
+        ):
             return PolicyDecision(
                 allowed=False,
                 reason="tool_not_allowed_by_policy",
