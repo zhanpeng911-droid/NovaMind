@@ -108,8 +108,8 @@ def _merge_hook_state_patch(state_updates: dict, state_patch: dict) -> None:
 
 
 def create_agent_app(
-    provider_name: str = "openai",
-    model_name: str = "gpt-4o-mini",
+    provider_name: str | None = None,
+    model_name: str | None = None,
     tools: list | None = None,
     checkpointer=None,  # 保留兼容性，实际不再使用
     token_tracker: TokenTracker | None = None,
@@ -135,6 +135,11 @@ def create_agent_app(
     Returns:
         NovaMindAgent 实例
     """
+    _ = checkpointer  # 保留签名兼容，运行时不再使用
+    # 显式参数优先；未传入时才读 .env，最后回退 openai / gpt-4o-mini
+    provider_name = provider_name or os.getenv("DEFAULT_PROVIDER") or "openai"
+    model_name = model_name or os.getenv("DEFAULT_MODEL") or "gpt-4o-mini"
+
     # 初始化核心组件
     _audit = audit_logger or AuditLogger()
     _tracker = token_tracker or TokenTracker()

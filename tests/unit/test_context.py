@@ -245,7 +245,11 @@ class TestSummaryLLMEvaluation(unittest.TestCase):
         if not api_key or not model:
             raise unittest.SkipTest("缺少 API Key 或模型配置，跳过 LLM 评估测试")
 
-        from langchain_openai import ChatOpenAI
+        try:
+            from langchain_openai import ChatOpenAI
+        except ImportError:
+            raise unittest.SkipTest("缺少 langchain-openai 依赖，跳过 LLM 评估测试")
+
         cls.llm = ChatOpenAI(
             model=model,
             api_key=api_key,

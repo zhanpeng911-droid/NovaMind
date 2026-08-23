@@ -13,6 +13,7 @@ from novamind.core.state_machine import AgentState, NovaMindAgent
 from novamind.core.context import ContextManager
 from novamind.core.policy import HarnessPolicy
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from _fakes import FakeLLM, FakeAuditLogger
 
 
 @dataclass
@@ -118,31 +119,21 @@ class TestAgentContextPackLogging(unittest.TestCase):
 
     def test_context_pack_event_is_logged(self):
         async def _test():
-            events = []
+            audit = FakeAuditLogger()
+            fake_llm = FakeLLM(responses=[AIMessage(content="ok")])
 
-            class FakeAuditLogger:
-                def log_event(self, thread_id: str, event: str, **kwargs):
-                    events.append({"thread_id": thread_id, "event": event, **kwargs})
-
-            class FakeLLM:
-                def bind_tools(self, tools):
-                    return self
-
-                def invoke(self, messages, **kwargs):
-                    return AIMessage(content="ok")
-
-            with patch("novamind.core.agent.get_provider", return_value=FakeLLM()), \
+            with patch("novamind.core.agent.get_provider", return_value=fake_llm), \
                     patch("novamind.core.agent.load_dynamic_skills", return_value=[]), \
                     patch("novamind.core.agent.load_mcp_tools", return_value=[]):
                 from novamind.core.agent import create_agent_app
 
                 agent = create_agent_app(
-                    audit_logger=FakeAuditLogger(),
+                    audit_logger=audit,
                     tools=[],
                 )
                 await agent.run("请帮我看看 README 文件", thread_id="ctx_pack_test")
 
-            context_events = [event for event in events if event["event"] == "context_pack_loaded"]
+            context_events = audit.get_events("context_pack_loaded")
             self.assertEqual(len(context_events), 1)
             self.assertEqual(context_events[0]["thread_id"], "ctx_pack_test")
             self.assertIn("INDEX.md", context_events[0]["documents"])
@@ -191,39 +182,27 @@ class TestHarnessPolicy(unittest.TestCase):
 
     def test_tool_executor_emits_policy_violation(self):
         async def _test():
-            events = []
-            call_count = 0
+            audit = FakeAuditLogger()
+            fake_llm = FakeLLM(responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "write_office_file", "args": {"filepath": "a.txt", "content": "x"}, "id": "tc_1"}],
+                ),
+                AIMessage(content="收到，当前操作被策略拦截。"),
+            ])
 
-            class FakeAuditLogger:
-                def log_event(self, thread_id: str, event: str, **kwargs):
-                    events.append({"thread_id": thread_id, "event": event, **kwargs})
-
-            class FakeLLM:
-                def bind_tools(self, tools):
-                    return self
-
-                def invoke(self, messages, **kwargs):
-                    nonlocal call_count
-                    call_count += 1
-                    if call_count == 1:
-                        return AIMessage(
-                            content="",
-                            tool_calls=[{"name": "write_office_file", "args": {"filepath": "a.txt", "content": "x"}, "id": "tc_1"}],
-                        )
-                    return AIMessage(content="收到，当前操作被策略拦截。")
-
-            with patch("novamind.core.agent.get_provider", return_value=FakeLLM()), \
+            with patch("novamind.core.agent.get_provider", return_value=fake_llm), \
                     patch("novamind.core.agent.load_dynamic_skills", return_value=[]), \
                     patch("novamind.core.agent.load_mcp_tools", return_value=[]):
                 from novamind.core.agent import create_agent_app
 
                 agent = create_agent_app(
-                    audit_logger=FakeAuditLogger(),
+                    audit_logger=audit,
                     tools=[],
                 )
                 result = await agent.run("把这个文件覆盖全部并删除旧内容", thread_id="policy_test")
 
-            violation_events = [event for event in events if event["event"] == "policy_violation"]
+            violation_events = audit.get_events("policy_violation")
             self.assertEqual(len(violation_events), 1)
             self.assertEqual(violation_events[0]["reason"], "confirmation_required_by_policy")
             tool_messages = [msg for msg in result.messages if isinstance(msg, ToolMessage)]

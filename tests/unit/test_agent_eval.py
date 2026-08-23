@@ -21,43 +21,7 @@ from langchain_core.messages import (
 )
 from novamind.core.state_machine import AgentState, NovaMindAgent
 from novamind.core.context import ContextManager
-
-
-# ==================== FakeLLM 基础设施 ====================
-
-class FakeLLM:
-    """
-    可编程的假 LLM，用于 agent eval。
-
-    用法：
-        fake = FakeLLM(responses=[
-            AIMessage(content="Hello!"),           # 第1次调用返回
-            AIMessage(content="Done."),             # 第2次调用返回
-        ])
-        # 或者用 sequence 支持 tool_calls
-        fake = FakeLLM(responses=[
-            AIMessage(content="", tool_calls=[...]),  # 触发工具调用
-            AIMessage(content="Result received"),      # 工具结果后收敛
-        ])
-    """
-
-    def __init__(self, responses=None):
-        self._responses = list(responses or [])
-        self._call_count = 0
-        self.call_history = []  # 记录每次调用的参数
-
-    def invoke(self, messages, **kwargs):
-        self.call_history.append(messages)
-        if self._call_count < len(self._responses):
-            resp = self._responses[self._call_count]
-            self._call_count += 1
-            return resp
-        # 默认返回
-        return AIMessage(content="[FakeLLM default]")
-
-    def bind_tools(self, tools):
-        """返回自身，假装绑定了工具（FakeLLM 忽略 tools）"""
-        return self
+from _fakes import FakeLLM
 
 
 # ==================== Agent Eval 测试 ====================

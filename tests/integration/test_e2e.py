@@ -5,54 +5,22 @@ NovaMind 端到端测试
 使用 FakeLLM + patch 模式，不依赖真实网络。
 """
 import asyncio
+import json
+import os
+import tempfile
 import unittest
 import uuid
 from unittest.mock import patch
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 from novamind.core.state_machine import NovaMindAgent, ConversationStore
+from novamind.core.logger import AuditLogger
+from _fakes import FakeLLM, FakeAuditLogger
 
 
 def _unique_thread_id(prefix="e2e"):
     """生成唯一 thread_id，避免测试间共享 SQLite 数据"""
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
-
-
-class FakeLLM:
-    """可编程的假 LLM，按预设序列返回响应"""
-
-    def __init__(self, responses=None):
-        self._responses = list(responses or [])
-        self._call_count = 0
-        self.call_history = []
-
-    def bind_tools(self, tools):
-        return self
-
-    def invoke(self, messages, **kwargs):
-        self.call_history.append(messages)
-        if self._call_count < len(self._responses):
-            resp = self._responses[self._call_count]
-            self._call_count += 1
-            return resp
-        return AIMessage(content="[FakeLLM default]")
-
-    @property
-    def call_count(self):
-        return self._call_count
-
-
-class FakeAuditLogger:
-    """收集审计事件用于断言"""
-
-    def __init__(self):
-        self.events = []
-
-    def log_event(self, thread_id: str, event: str, **kwargs):
-        self.events.append({"thread_id": thread_id, "event": event, **kwargs})
-
-    def get_events(self, event_type: str):
-        return [e for e in self.events if e["event"] == event_type]
 
 
 def _build_agent(fake_llm, fake_audit, tools=None):
@@ -261,6 +229,103 @@ class TestEndToEndAgentCycle(unittest.TestCase):
             agent.clear_conversation(tid)
 
         asyncio.run(_test())
+
+
+class TestAuditLoggerJsonlPersistence(unittest.TestCase):
+    """真实 AuditLogger 写 JSONL 落盘 + 事件序列 端到端验证。
+
+    不用内存 FakeAuditLogger，而是用真实 AuditLogger 指向临时目录，
+    跑完整 agent 循环后 shutdown 冲刷队列，读回磁盘上的 JSONL 校验：
+      - 事件真实落盘（thread_id.jsonl 存在）
+      - 事件字段完整（thread_id/ts/event + 附加数据）
+      - 单轮对话：context_pack_loaded → llm_input → ai_message 顺序
+      - 工具轮：tool_call → tool_result → ai_message 顺序
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.log_dir = self._tmpdir.name
+        # 重置单例，用临时目录初始化真实 AuditLogger（与 test_logger 同套路）
+        AuditLogger._instance = None
+        self.logger = AuditLogger(log_dir=self.log_dir)
+
+    def tearDown(self):
+        self.logger.shutdown()
+        AuditLogger._instance = None
+        self._tmpdir.cleanup()
+
+    def _read_events(self, thread_id: str) -> list[dict]:
+        file_path = os.path.join(self.log_dir, f"{thread_id}.jsonl")
+        self.assertTrue(
+            os.path.exists(file_path),
+            f"JSONL 审计文件未落盘: {file_path}",
+        )
+        with open(file_path, encoding="utf-8") as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+    def test_simple_turn_persists_events_in_order(self):
+        """单轮对话：事件真实落盘且顺序 context_pack_loaded → llm_input → ai_message。"""
+        tid = f"audit_{uuid.uuid4().hex[:8]}"
+        llm = FakeLLM(responses=[AIMessage(content="你好，我是 NovaMind。")])
+
+        with patch("novamind.core.agent.get_provider", return_value=llm), \
+                patch("novamind.core.agent.load_dynamic_skills", return_value=[]), \
+                patch("novamind.core.agent.load_mcp_tools", return_value=[]):
+            from novamind.core.agent import create_agent_app
+            agent = create_agent_app(audit_logger=self.logger, tools=[])
+            asyncio.run(agent.run("你好", thread_id=tid))
+            agent.clear_conversation(tid)
+
+        # shutdown 冲刷队列到磁盘
+        self.logger.shutdown()
+        lines = self._read_events(tid)
+
+        events = [e["event"] for e in lines]
+        self.assertIn("context_pack_loaded", events)
+        self.assertIn("llm_input", events)
+        self.assertIn("ai_message", events)
+        self.assertLess(events.index("context_pack_loaded"), events.index("ai_message"))
+        self.assertLess(events.index("llm_input"), events.index("ai_message"))
+
+        # 字段完整 + 内容落盘
+        for e in lines:
+            self.assertEqual(e["thread_id"], tid)
+            self.assertIn("ts", e)
+        ai_events = [e for e in lines if e["event"] == "ai_message"]
+        self.assertIn("NovaMind", ai_events[0]["content"])
+
+    def test_tool_turn_persists_full_sequence(self):
+        """工具轮：tool_call → policy_check → tool_result → ai_message 顺序落盘。"""
+        tid = f"audit_{uuid.uuid4().hex[:8]}"
+        llm = FakeLLM(responses=[
+            AIMessage(content="", tool_calls=[
+                {"name": "get_current_time", "args": {}, "id": "tc_1"},
+            ]),
+            AIMessage(content="时间已获取。"),
+        ])
+
+        with patch("novamind.core.agent.get_provider", return_value=llm), \
+                patch("novamind.core.agent.load_dynamic_skills", return_value=[]), \
+                patch("novamind.core.agent.load_mcp_tools", return_value=[]):
+            from novamind.core.agent import create_agent_app
+            agent = create_agent_app(audit_logger=self.logger, tools=[])
+            asyncio.run(agent.run("现在几点", thread_id=tid))
+            agent.clear_conversation(tid)
+
+        self.logger.shutdown()
+        lines = self._read_events(tid)
+
+        events = [e["event"] for e in lines]
+        self.assertIn("tool_call", events)
+        self.assertIn("policy_check", events)
+        self.assertIn("tool_result", events)
+        self.assertIn("ai_message", events)
+        # 关键顺序：tool_call 先于 tool_result，tool_result 先于最终 ai_message
+        self.assertLess(events.index("tool_call"), events.index("tool_result"))
+        self.assertLess(events.index("tool_result"), events.index("ai_message"))
+        # 工具名落盘
+        tool_calls = [e for e in lines if e["event"] == "tool_call"]
+        self.assertEqual(tool_calls[0]["tool"], "get_current_time")
 
 
 if __name__ == "__main__":

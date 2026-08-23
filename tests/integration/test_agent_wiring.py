@@ -12,30 +12,7 @@ from unittest.mock import patch
 from langchain_core.messages import AIMessage, HumanMessage
 
 from novamind.core.middlewares import BaseAgentMiddleware, MiddlewareResult
-
-
-class FakeLLM:
-    def __init__(self, responses=None):
-        self._responses = list(responses or [])
-        self._i = 0
-
-    def bind_tools(self, tools):
-        return self
-
-    def invoke(self, messages, **kwargs):
-        if self._i < len(self._responses):
-            resp = self._responses[self._i]
-            self._i += 1
-            return resp
-        return AIMessage(content="done")
-
-
-class FakeAudit:
-    def __init__(self):
-        self.events = []
-
-    def log_event(self, thread_id, event, **kwargs):
-        self.events.append((event, kwargs))
+from _fakes import FakeLLM, FakeAudit
 
 
 class _Recording(BaseAgentMiddleware):
@@ -54,6 +31,9 @@ class _Recording(BaseAgentMiddleware):
 
 
 def _build(middlewares=None, llm_responses=None):
+    # 默认给一条显式回复，保持原 FakeLLM 的兜底行为（content="done"）
+    if not llm_responses:
+        llm_responses = [AIMessage(content="done")]
     fake_llm = FakeLLM(llm_responses)
     with patch("novamind.core.agent.get_provider", return_value=fake_llm), \
             patch("novamind.core.agent.load_dynamic_skills", return_value=[]), \
