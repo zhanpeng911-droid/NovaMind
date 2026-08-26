@@ -223,3 +223,49 @@ tests/
 | test_state_machine_hooks.py | 4 | 状态机钩子接线 |
 | test_sandbox_tools.py | 3 | 沙箱工具面 |
 | test_plugin_loader.py | 1 | 动态插件加载 |
+
+---
+
+## 七、质量保障专项执行报告（QUALITY_ASSURANCE_PLAN P0-P2 全量落地）
+
+> 执行日期：2026-08-26。每个任务独立提交；过程中发现的 6 项新问题已登记至方案「遗留问题登记」。
+
+### 环境与依赖（P0-A）
+
+| 项 | 结果 |
+| --- | --- |
+| pyproject 补齐 fastapi/uvicorn/pywebview/jieba | ✅ 漂移消除 |
+| requires-python `>=3.12,<3.14` + `.python-version=3.12` | ✅ 新环境不再误选 3.14 |
+| requirements.txt 改为 uv export 锁定导出 | ✅ 唯一事实源 pyproject |
+| 删 `.venv` 后 `uv sync --extra dev && pytest` | ✅ 337→459 全绿 |
+
+### CI（P0-B）
+
+GitHub Actions：pytest 矩阵 3.12/3.13（`--locked`，覆盖率产物上传）+ ruff 强制 job + mypy advisory job。branch protection 需仓库管理员在 GitHub 后台开启。
+
+### 覆盖率盲区（P1）
+
+| 模块 | 前 | 后 |
+| --- | --- | --- |
+| sandbox 整体 | 63% | **80%**（local_runtime 39→83、docker_runtime 42→97、audit_guard 41→100） |
+| ive_focuser / llm_mutator / evolution manager | 15/24/19% | **91 / 83 / 80%** |
+| metric_monitor / score_delta_gate / git_ratchet | — | **96 / 96 / 覆盖** |
+| injector / task_quality_judge / skill_judgment_analyzer | 19/31/30% | **100 / 96 / 91%** |
+| builtins 工具面 | 18% | **88%** |
+| webui server.py / app.py | 61 / 23% | **70 / 42%** |
+| **全量** | 66% | **75%**，CI 底线 `--cov-fail-under=70` 只升不降 |
+
+### 工具链（P2）
+
+- **ruff**（E4/E7/E9/F 最小集）：存量 94 → 清零；CI 强制 job
+- **mypy**（首批 6 文件，follow_imports=silent）：零错误；CI advisory job
+
+### 测试规模演进
+
+147（v2 报告） → 337（P1-P3 基建） → **459**（本专项），unit/integration 两层结构。
+
+### 附带修复的真实 bug
+
+1. ConversationStore SQLite 连接泄漏（Windows 文件锁）
+2. langchain_core.messages 进程内重载导致的 isinstance 代际分裂（改 `.type` duck-typing）
+3. 测试清空整个 os.environ 剥掉 SystemRoot 致 uv 版 OpenSSL 崩溃（4 处）

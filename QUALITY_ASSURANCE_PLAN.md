@@ -193,4 +193,9 @@ target-version = "py310"
 
 ## 五、遗留问题登记（执行中发现的新问题记在这里）
 
-- （执行方填写）
+- **#1 ConversationStore._init_db 连接泄漏（已修复，fe41d37）**：`with sqlite3.connect(...)` 只管事务提交不关连接；coverage 改变 GC 时机后 Windows 文件锁导致 `TestListThreads` 在 `--cov` 下稳定失败。改 try/finally 显式 close。
+- **#2 langchain_core.messages 进程内被重复执行（已修复，373d499）**：带 `--cov` 时 collection 阶段该模块整体重载一次（import 元路径探针实锤：同文件路径两个类对象）。若重载落在 state_machine 与 agent 绑定之间，isinstance 跨"代际"失败 → context pack 退化，约 30–50% 复现。修复：消息类别判定统一改 `.type` 字符串属性（duck-typing），不再依赖跨模块类身份。原偶现子集连续 10 次全绿。
+- **#3 方案误诊更正**：「missing_key 测试失败 = Python 3.14 SSL 崩溃」不准确。实测 uv 独立版 CPython 3.12 同样崩溃；真因是测试用 `patch.dict(os.environ, {}, clear=True)` 清空整个环境，剥掉 SystemRoot 等 uv 版 OpenSSL 初始化必需变量（保留 SystemRoot 即恢复）。已在 P0-A 中以 `_fakes.env_without()` 修复 4 处。
+- **#4 方案数字勘误**：tests/unit 实为 24 个文件（方案写 26）；健康环境下 webui/server.py 覆盖 61% 非 0%（0% 是坏环境收集失败的假象）、app.py 23%；总覆盖健康环境 66%（方案 64% 为坏环境测值）。
+- **#5 save_user_profile 备份时间戳精确到秒**：同秒内连续保存会合并为一个备份文件。按真实语义以假时钟测试验证「保留最近 10 份」逻辑；如需更高粒度可在文件名加入毫秒/序号（未改动，留观）。
+- **#6 内置定时任务工具的读写经由 task_store 模块级 TASKS_FILE**：测试需同时 patch builtins 与 task_store 两处绑定才能完全隔离（test_builtins_tools.py 已处理）。若未来重构，建议把路径收敛为单一来源。

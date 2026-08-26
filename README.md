@@ -2,7 +2,7 @@
 
 > **一个可审计的深度研究 Agent 内核。** 不是又一个套壳聊天机器人。
 
-NovaMind 把"Agent 怎么设计"这件事拆到了每个模块都能独立验证的程度——325 个测试守着每一层。它吸收了 Poirot 的内核精华（横切中间件、五层记忆、三组件沙箱、三层技能自进化、多 Agent 共享沙箱、token 预算治理），同时保留了自研编排、零信任边界、可审计可追溯的看家本领。
+NovaMind 把"Agent 怎么设计"这件事拆到了每个模块都能独立验证的程度——459 个测试守着每一层。它吸收了 Poirot 的内核精华（横切中间件、五层记忆、三组件沙箱、三层技能自进化、多 Agent 共享沙箱、token 预算治理），同时保留了自研编排、零信任边界、可审计可追溯的看家本领。
 
 🧠 **自研编排 + 横切中间件** 不是把所有逻辑塞进 agent loop，而是保留自研异步状态机（`agent → tools → agent` 条件路由），把记忆召回、技能注入、沙箱生命周期、工具执行、上下文治理全部拆成可插拔中间件——`before_agent / after_agent / before_model / after_model / wrap_tool_call` 五个钩子各司其职。加一个功能 = 加一个 middleware，不动核心循环。`app → agents` 依赖严格单向，跨层用 Protocol 破循环依赖。
 
@@ -260,13 +260,22 @@ NovaMind/
 
 ## 开发与测试
 
+标准工作流（依赖唯一事实源是 `pyproject.toml`；`requirements.txt` 由 `uv export` 再生，禁止手改）：
+
 ```powershell
-python -m pip install -e ".[dev]"
-python -m pytest -q                # 全量 325 个测试
-python -m pytest tests/test_memory.py -q     # 五层记忆
-python -m pytest tests/test_skill.py -q      # 三层技能
-novamind doctor --json             # 运行时自检
+uv sync --extra dev                          # 安装依赖（严格按 uv.lock）
+uv run --no-sync pytest tests -q             # 全量 459 个测试（约 10 秒）
+uv run --no-sync pytest tests/unit -q        # 单元层
+uv run --no-sync pytest tests/integration -q # 集成/端到端层
+uv run --no-sync ruff check novamind entry tests   # Lint（CI 强制）
+uv run --no-sync mypy novamind/core/policy.py novamind/core/token_tracker.py     novamind/core/event_bus.py novamind/core/task_store.py     novamind/core/skill/types.py novamind/core/sandbox/types.py  # 类型检查（首批）
+novamind doctor --json                       # 运行时自检
 ```
+
+- **Python**：3.12–3.13（CI 矩阵同版本；3.14 因 langchain-openai 导入期 SSL 崩溃暂排除）
+- **覆盖率**：全量约 75%，CI 底线 `--cov-fail-under=70`，只升不降
+- **规范**：修 bug 必须附带可复现的回归测试随同一提交；新模块合入自带测试；
+  skip 测试注明原因
 
 ### 打包桌面应用
 
@@ -279,7 +288,7 @@ pyinstaller NovaMind.spec --noconfirm   # 产物 dist/nova-mind-gui.exe（单文
 
 ### 测试覆盖
 
-当前共 **325 个测试**，锁死各层关键不变量：
+当前共 **459 个测试**（unit + integration 两层），锁死各层关键不变量：
 
 | 层 | 覆盖不变量 |
 | --- | --- |
