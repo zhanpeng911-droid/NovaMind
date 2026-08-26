@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .types import EvalContext, EvolutionContext, EvolutionRecord
-from ..types import SkillRecord
 
 
 def _now_iso() -> str:

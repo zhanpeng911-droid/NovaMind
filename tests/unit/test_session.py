@@ -31,7 +31,6 @@ class TestGenerateThreadId(unittest.TestCase):
 
     def test_contains_date_prefix(self):
         from entry.main import generate_thread_id
-        from datetime import datetime
         tid = generate_thread_id()
         date_part = tid.split("_")[1]  # YYYYMMDD
         self.assertEqual(len(date_part), 8)

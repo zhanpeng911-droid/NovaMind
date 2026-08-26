@@ -19,7 +19,6 @@ import asyncio
 import random
 import secrets
 from datetime import datetime
-from langchain_core.messages import HumanMessage
 
 from prompt_toolkit import PromptSession, print_formatted_text
 from prompt_toolkit.patch_stdout import patch_stdout

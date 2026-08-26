@@ -6,10 +6,10 @@ import json
 import tempfile
 import unittest
 from dataclasses import dataclass
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 
 from novamind.core.agent import _extract_token_counts
-from novamind.core.state_machine import AgentState, NovaMindAgent
+from novamind.core.state_machine import AgentState
 from novamind.core.context import ContextManager
 from novamind.core.policy import HarnessPolicy
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
@@ -58,7 +58,6 @@ class TestAsyncBlockingIsolation(unittest.TestCase):
     def test_tool_executor_runs_in_thread(self):
         """验证 tool_executor 中 tool.invoke 被 asyncio.to_thread 包裹"""
         async def _test():
-            agent = NovaMindAgent()
             call_thread_id = None
 
             def slow_tool(args):
@@ -72,7 +71,6 @@ class TestAsyncBlockingIsolation(unittest.TestCase):
             mock_tool.name = "test_tool"
             mock_tool.invoke = slow_tool
 
-            from novamind.core.agent import create_agent_app
             # 通过闭包直接测试 tool_executor
             tool_map = {"test_tool": mock_tool}
 

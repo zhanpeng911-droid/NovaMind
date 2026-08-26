@@ -17,7 +17,6 @@ from unittest.mock import patch
 from novamind.core.sandbox.exceptions import (
     SandboxCommandError,
     SandboxFileNotFoundError,
-    SandboxPermissionError,
     SandboxRuntimeError,
 )
 from novamind.core.sandbox.runtimes import LocalRuntime

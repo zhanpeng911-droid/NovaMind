@@ -17,7 +17,7 @@ import os
 import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
-from typing import Any, Optional
+from typing import Any
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 

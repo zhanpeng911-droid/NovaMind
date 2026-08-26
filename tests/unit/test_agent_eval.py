@@ -11,15 +11,13 @@ NovaMind Agent Eval 层 — 行为级验证
   6. sandbox 拒绝路径：越权访问被拒绝
 """
 import asyncio
-import os
-import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from langchain_core.messages import (
-    HumanMessage, AIMessage, ToolMessage, SystemMessage, RemoveMessage
+    HumanMessage, AIMessage, ToolMessage, RemoveMessage
 )
-from novamind.core.state_machine import AgentState, NovaMindAgent
+from novamind.core.state_machine import NovaMindAgent
 from novamind.core.context import ContextManager
 from _fakes import FakeLLM, env_without
 

@@ -7,7 +7,6 @@ AuditGuard 单元测试（P1 覆盖率盲区补齐，零信任 defense-in-depth�
   - pass 档：普通命令透传
   - journal 审计事件写入 + journal 抛异常不影响主流程
 """
-import logging
 import unittest
 
 from novamind.core.sandbox.exceptions import SandboxPermissionError

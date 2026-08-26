@@ -5,7 +5,6 @@ NovaMind 中间件管道测试
 """
 import asyncio
 import unittest
-import time
 from novamind.core.middleware import (
     MiddlewarePipeline, MiddlewareContext,
     timing_middleware, logging_middleware, rate_limit_middleware,

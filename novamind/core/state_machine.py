@@ -10,13 +10,12 @@ NovaMind 自定义状态机引擎
   - SQLite持久化（对话历史跨会话保存）
 """
 from __future__ import annotations
-import asyncio
 import json
 import os
 import threading
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Awaitable, Optional
+from typing import Any, Callable, Awaitable
 from langchain_core.messages import (
     BaseMessage, HumanMessage, SystemMessage,
     AIMessage, ToolMessage, RemoveMessage
@@ -366,7 +365,6 @@ class NovaMindAgent:
 
     async def _dispatch_hook(self, hook: str, state: AgentState, thread_id: str) -> None:
         """分发中间件钩子并把结果应用到 state（before/after_agent 用）。"""
-        from .middlewares import MiddlewareResult
 
         result = await self._middleware_manager.dispatch(
             hook,
@@ -629,7 +627,6 @@ class NovaMindAgent:
 
 def _apply_result(state: AgentState, result) -> None:
     """把 MiddlewareResult 应用到 AgentState（state_patch + messages_patch）。"""
-    from .middlewares import MiddlewareResult
 
     if result.state_patch:
         for key, value in result.state_patch.items():

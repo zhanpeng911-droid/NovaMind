@@ -128,7 +128,6 @@ class TestBuildDelegateTools(unittest.TestCase):
         with patch("novamind.core.multiagent.bootstrap.resolve_pi_command", return_value="pi"), \
                 patch.dict(os.environ, {}, clear=False), \
                 patch("novamind.core.multiagent.bootstrap.PiRuntime") as runtime_cls:
-            import novamind.core.multiagent.bootstrap as bootstrap
             saved = {k: os.environ.pop(k) for k in ("NOVAMIND_PI_PROVIDER", "NOVAMIND_PI_MODEL") if k in os.environ}
             try:
                 build_delegate_tools()

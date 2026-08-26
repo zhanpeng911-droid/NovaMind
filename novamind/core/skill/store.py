@@ -14,7 +14,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from .types import SkillHealth, SkillLineage, SkillMetrics, SkillRecord
 

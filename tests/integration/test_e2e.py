@@ -11,9 +11,8 @@ import tempfile
 import unittest
 import uuid
 from unittest.mock import patch
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
-from novamind.core.state_machine import NovaMindAgent, ConversationStore
 from novamind.core.logger import AuditLogger
 from _fakes import FakeLLM, FakeAuditLogger
 

@@ -13,7 +13,6 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
-from ..memory.schema import MemoryTrace
 from ..memory.strategies.default.manager import set_turn_id
 from ..memory.types import MemoryQuery, RetrievalResult
 from .protocol import BaseAgentMiddleware, MiddlewareContext, MiddlewareResult

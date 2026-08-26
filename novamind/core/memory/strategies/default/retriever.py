@@ -17,7 +17,6 @@ from collections import defaultdict
 from typing import Callable
 
 from ...memory_store import MemoryStore
-from ...retriever import Retriever
 from ...schema import MemoryTrace
 from ...types import MemoryQuery, RetrievalResult
 from ._constants import BM25_PARAMS

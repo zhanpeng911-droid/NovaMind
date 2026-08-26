@@ -11,9 +11,8 @@ NovaMind Token追踪与成本估算模块
 """
 from __future__ import annotations
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
 
 
 @dataclass

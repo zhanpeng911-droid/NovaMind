@@ -192,7 +192,7 @@ class TestSummaryEvaluation(unittest.TestCase):
             HumanMessage(content="讨论 Python 架构"),
             AIMessage(content="架构设计很重要"),
         ]
-        summary = self.ctx.generate_summary("", discarded)
+        self.ctx.generate_summary("", discarded)
         self.assertIsNotNone(self.ctx._last_summary_eval)
         self.assertIn("quality", self.ctx._last_summary_eval)
 

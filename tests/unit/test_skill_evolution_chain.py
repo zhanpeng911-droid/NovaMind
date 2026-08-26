@@ -23,7 +23,6 @@ from novamind.core.skill.evolution.manager import EvolutionManager
 from novamind.core.skill.evolution.mutators.llm_mutator import LLMMutator
 from novamind.core.skill.evolution.triggers.metric_monitor import MetricMonitorTrigger
 from novamind.core.skill.evolution.types import (
-    EvalContext,
     EvalResult,
     EvolutionContext,
     GateDecision,

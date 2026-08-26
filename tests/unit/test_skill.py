@@ -19,15 +19,10 @@ from novamind.core.skill import (
 )
 from novamind.core.skill.types import SkillRecord, SkillLineage
 from novamind.core.skill.evolution import (
-    EvolutionManager,
     MetricMonitorTrigger,
-    IVEFocuser,
-    LLMMutator,
     ScoreDeltaGate,
-    ProgrammaticEvalBridge,
     GitRatchet,
 )
-from novamind.core.skill.evolution.types import EvolutionContext
 from novamind.core.skill.eval.analyzers import ContractCompiler, ResponseContractChecker
 from novamind.core.skill.eval.analyzers.checks import check_nonempty, check_json_parseable
 
@@ -152,10 +147,6 @@ class TestEvolutionLoop(unittest.TestCase):
         self.skill_file = Path(self.tmp.name) / "bad.md"
         self.skill_file.write_text("---\nname: bad\ndescription: bad skill\n---\nstep 1 do thing\n", encoding="utf-8")
         # 更新 path 指向真实文件
-        from novamind.core.skill.types import SkillRecord as SR
-        fixed = SR(skill_id="bad__builtin", name="bad", path=str(self.skill_file), content_hash="x",
-                   description="bad skill", enabled=True, total_selections=10, total_applied=1,
-                   total_completions=1, total_fallbacks=8, lineage=SkillLineage(origin="BUILTIN"))
         self.store._conn.execute("UPDATE skill_records SET path=? WHERE skill_id=?", (str(self.skill_file), "bad__builtin"))
         self.store._conn.commit()
 

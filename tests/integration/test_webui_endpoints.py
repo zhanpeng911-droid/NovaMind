@@ -8,7 +8,6 @@ WebUI 端点错误分支 + app.py 启动辅助单元测试（P1 覆盖率盲区�
   - /skills store 异常 → error 字段而非 500
   - app._wait_for_server：就绪返回 / 超时抛 TimeoutError
 """
-import json
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch

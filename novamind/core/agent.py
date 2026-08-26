@@ -13,7 +13,7 @@ import asyncio
 import uuid
 from typing import Any
 from langchain_core.messages import (
-    HumanMessage, SystemMessage, AIMessage, ToolMessage, RemoveMessage
+    AIMessage, ToolMessage, RemoveMessage
 )
 from .state_machine import AgentState, NovaMindAgent, ConversationStore
 from .middleware import MiddlewarePipeline, MiddlewareContext, timing_middleware, logging_middleware
@@ -28,7 +28,7 @@ from .token_tracker import TokenTracker
 from .context import ContextManager
 from .plugin_loader import load_dynamic_skills
 from .mcp_adapter import load_mcp_tools
-from .config import MEMORY_DIR, DB_PATH
+from .config import DB_PATH
 from .policy import HarnessPolicy
 import os
 

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import re
-from pathlib import Path
 
 _WIN_DRIVE_RE = re.compile(r"^([A-Za-z]):[\\/](.*)$")
 

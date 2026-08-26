@@ -18,7 +18,6 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from novamind.core.context_engineering.utilities import (
     token_counter,
     resolve_window_size,
-    resolve_model_name,
 )
 from novamind.core.context_engineering.strategies.default.budget import BudgetTrackerExecutor
 from novamind.core.context_engineering.strategies.default.externalizer import ExternalizerExecutor

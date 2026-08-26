@@ -20,9 +20,9 @@ import re
 from dataclasses import dataclass
 from typing import Any
 from langchain_core.messages import (
-    BaseMessage, SystemMessage, HumanMessage, RemoveMessage
+    BaseMessage, SystemMessage, HumanMessage
 )
-from .config import MEMORY_DIR, DOCS_DIR, PROFILE_PATH
+from .config import DOCS_DIR, PROFILE_PATH
 
 
 @dataclass(frozen=True)
@@ -387,7 +387,6 @@ class ContextManager:
             f"总字数不要超过{self._summary_max_chars}字"
         )
 
-        from langchain_core.messages import HumanMessage
         response = self._llm.invoke(
             [HumanMessage(content=summary_prompt)],
             config={"callbacks": []},

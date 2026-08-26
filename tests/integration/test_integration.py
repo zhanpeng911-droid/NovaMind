@@ -12,7 +12,6 @@ NovaMind Integration Smoke 层 — 关键链路冒烟验证
   5. 审计日志写入与读取
 """
 import asyncio
-import json
 import os
 import tempfile
 import time
@@ -21,7 +20,7 @@ from unittest.mock import patch
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
-from novamind.core.state_machine import AgentState, NovaMindAgent, ConversationStore
+from novamind.core.state_machine import NovaMindAgent, ConversationStore
 
 
 # ==================== 1. run 会话创建与恢复 ====================
@@ -173,7 +172,8 @@ class TestIntegrationSqliteIsolation(unittest.TestCase):
         self._db_path = os.path.join(self._tmp_dir, "test.sqlite3")
 
     def tearDown(self):
-        import gc, shutil
+        import gc
+        import shutil
         gc.collect()
         shutil.rmtree(self._tmp_dir, ignore_errors=True)
 

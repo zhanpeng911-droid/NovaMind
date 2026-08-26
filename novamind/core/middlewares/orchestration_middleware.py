@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import json
 
 from ..multiagent.tools import set_current_state
 from .protocol import BaseAgentMiddleware, MiddlewareContext, MiddlewareResult

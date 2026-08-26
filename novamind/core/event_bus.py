@@ -8,7 +8,7 @@ NovaMind 事件总线
   - 系统事件 -> 多个消费者并行处理
 """
 import asyncio
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable
 
 
 class EventBus:

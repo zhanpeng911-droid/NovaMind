@@ -13,7 +13,6 @@ from novamind.core.state_machine import NovaMindAgent
 from novamind.core.middlewares import (
     BaseAgentMiddleware,
     MiddlewareManager,
-    MiddlewareContext,
     MiddlewareResult,
 )
 

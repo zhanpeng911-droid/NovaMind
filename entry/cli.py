@@ -16,8 +16,6 @@ import sys
 import typer
 import questionary
 import logging
-import json
-from typing import NoReturn
 from rich.console import Console
 from rich.panel import Panel
 from rich.status import Status
@@ -149,7 +147,7 @@ def config_wizard():
                     os.environ[f"{provider.upper()}_BASE_URL"] = base_url
 
             llm = get_provider(provider_name=provider, model_name=model_name)
-            response = llm.invoke([HumanMessage(content="回复我'收到'。")])
+            llm.invoke([HumanMessage(content="回复我'收到'。")])
 
             console.print(" [bold #b5bd68][ 配置成功!][/bold #b5bd68]")
 
@@ -251,8 +249,8 @@ def run_gui_command(
         import webview  # noqa: F401
     except ImportError:
         console.print(
-            f"[bold red]启动失败：缺少 pywebview 依赖！[/bold red]\n"
-            f"[dim]请运行 pip install pywebview 后重试。[/dim]"
+            "[bold red]启动失败：缺少 pywebview 依赖！[/bold red]\n"
+            "[dim]请运行 pip install pywebview 后重试。[/dim]"
         )
         raise typer.Exit(code=1)
 

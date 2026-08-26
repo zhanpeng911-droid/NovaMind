@@ -14,7 +14,7 @@ import os
 import tempfile
 import unittest
 from novamind.core.state_machine import (
-    AgentState, NovaMindAgent, ConversationStore, Node, Edge
+    AgentState, NovaMindAgent, ConversationStore, Edge
 )
 from novamind.core.context import ContextManager
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, RemoveMessage
@@ -336,7 +336,8 @@ class TestNovaMindAgent(unittest.TestCase):
                 self.assertEqual(call_count[0], 3)
 
             finally:
-                import gc, shutil
+                import gc
+                import shutil
                 gc.collect()
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -407,7 +408,8 @@ class TestNovaMindAgent(unittest.TestCase):
                 self.assertEqual(loaded[-1].content, "new after trim")
 
             finally:
-                import gc, shutil
+                import gc
+                import shutil
                 gc.collect()
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
