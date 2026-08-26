@@ -79,7 +79,10 @@ class ConversationStore:
         """初始化数据库表"""
         import sqlite3
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
-        with sqlite3.connect(self._db_path) as conn:
+        # 注意：不能用 with sqlite3.connect(...)——它只管事务提交、不关闭连接，
+        # Windows 下会锁住文件导致临时目录清理失败（WinError 32）。
+        conn = sqlite3.connect(self._db_path)
+        try:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS conversations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,6 +105,8 @@ class ConversationStore:
                 )
             """)
             conn.commit()
+        finally:
+            conn.close()
 
     def save_message(self, thread_id: str, msg: BaseMessage) -> None:
         """保存单条消息到数据库"""
