@@ -1,0 +1,15 @@
+# 安装：uv run --no-sync pre-commit install
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+  - repo: local
+    hooks:
+      - id: pytest-unit-smoke
+        name: pytest unit smoke
+        entry: uv run --no-sync pytest tests/unit -q -x
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

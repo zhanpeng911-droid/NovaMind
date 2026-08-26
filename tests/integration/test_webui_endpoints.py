@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
-from novamind.webui.app import _wait_for_server
+from novamind.webui.app import _find_available_url, _start_server, _wait_for_server, run_gui
 from novamind.webui.server import _safe_id, app
 
 
@@ -122,6 +122,96 @@ class TestWaitForServer(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 _wait_for_server("http://127.0.0.1:1", timeout=0.2)
         self.assertTrue(sleep_mock.called)
+
+
+class TestStartServer(unittest.TestCase):
+    def test_starts_uvicorn_in_daemon_thread_and_returns_server(self):
+        """_start_server：构造 uvicorn.Server、后台线程启动、返回 server 句柄。"""
+        fake_server = MagicMock()
+        thread_cls = MagicMock()
+        with patch("novamind.webui.app.uvicorn.Server", return_value=fake_server) as server_cls, \
+                patch("novamind.webui.app.threading.Thread", thread_cls):
+            server = _start_server("127.0.0.1", 8765)
+        self.assertIs(server, fake_server)
+        config = server_cls.call_args.args[0]
+        self.assertEqual(config.host, "127.0.0.1")
+        self.assertEqual(config.port, 8765)
+        thread_cls.assert_called_once()
+        self.assertIn(("daemon", True), thread_cls.call_args.kwargs.items())
+        thread_cls.return_value.start.assert_called_once()
+
+
+class _ServerStub:
+    """最小 server 桩：should_exit 初始为 False，行为与真实 uvicorn.Server 一致。"""
+
+    def __init__(self):
+        self.should_exit = False
+
+
+class TestFindAvailableUrl(unittest.TestCase):
+    def _patch_start(self, servers, created=None):
+        """按调用顺序返回预置 server 的 _start_server mock。"""
+        it = iter(servers)
+
+        def fake_start(host, port):
+            srv = next(it)
+            if created is not None:
+                created.append(srv)
+            return srv
+
+        return patch("novamind.webui.app._start_server", side_effect=fake_start)
+
+    def test_first_port_ok(self):
+        server = _ServerStub()
+        with self._patch_start([server]),                 patch("novamind.webui.app._wait_for_server") as wait:
+            got_server, url = _find_available_url("127.0.0.1", 9000, max_tries=3)
+        self.assertIs(got_server, server)
+        self.assertEqual(url, "http://127.0.0.1:9000")
+        wait.assert_called_once()
+        self.assertFalse(server.should_exit)
+
+    def test_port_conflict_falls_back_to_next(self):
+        """首端口就绪探测超时 → should_exit 置位并顺延下一端口。"""
+        first, second = _ServerStub(), _ServerStub()
+        with self._patch_start([first, second]),                 patch("novamind.webui.app._wait_for_server",
+                      side_effect=[TimeoutError("t"), None]):
+            _, url = _find_available_url("127.0.0.1", 9000, max_tries=3)
+        self.assertTrue(first.should_exit)  # 旧实例被要求退出，防僵尸进程
+        self.assertFalse(second.should_exit)
+        self.assertEqual(url, "http://127.0.0.1:9001")
+
+    def test_all_tries_exhausted_raises_runtime_error(self):
+        created: list[_ServerStub] = []
+        dead = [_ServerStub() for _ in range(2)]
+        with self._patch_start(dead, created),                 patch("novamind.webui.app._wait_for_server",
+                      side_effect=TimeoutError("t")):
+            with self.assertRaises(RuntimeError) as ctx:
+                _find_available_url("127.0.0.1", 9000, max_tries=2)
+        self.assertIn("9000~9001", str(ctx.exception))
+        # 每个尝试过的实例都被要求退出
+        self.assertTrue(all(s.should_exit for s in created))
+
+
+class TestRunGui(unittest.TestCase):
+    def test_normal_path_opens_window_and_stops_server_on_exit(self):
+        server = _ServerStub()
+        with patch("novamind.webui.app._find_available_url",
+                   return_value=(server, "http://127.0.0.1:8765")),                 patch("novamind.webui.app.webview.create_window") as cw,                 patch("novamind.webui.app.webview.start"):
+            run_gui()
+        # url 是第二个位置参数（第一个是窗口标题）
+        self.assertEqual(cw.call_args.args[1], "http://127.0.0.1:8765")
+        self.assertTrue(server.should_exit)  # finally 保证收尾
+
+    def test_headless_degrades_to_browser_until_interrupt(self):
+        """webview 起不来（headless）→ 打开系统浏览器并驻留，Ctrl+C 退出。"""
+        server = _ServerStub()
+        with patch("novamind.webui.app._find_available_url",
+                   return_value=(server, "http://127.0.0.1:8765")),                 patch("novamind.webui.app.webview.create_window",
+                      side_effect=RuntimeError("no display")),                 patch("novamind.webui.app.webbrowser.open") as browser,                 patch("novamind.webui.app.time.sleep",
+                      side_effect=KeyboardInterrupt):
+            run_gui()
+        browser.assert_called_once_with("http://127.0.0.1:8765")
+        self.assertTrue(server.should_exit)
 
 
 if __name__ == "__main__":

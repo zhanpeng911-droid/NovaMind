@@ -272,6 +272,8 @@ uv run --no-sync mypy novamind/core/policy.py novamind/core/token_tracker.py    
 novamind doctor --json                       # 运行时自检
 ```
 
+可选：`uv run --no-sync pre-commit install` 启用 Git 钩子（提交前 ruff 检查、推送前单元测试冒烟）。
+
 - **Python**：3.12–3.13（CI 矩阵同版本；3.14 因 langchain-openai 导入期 SSL 崩溃暂排除）
 - **覆盖率**：全量约 75%，CI 底线 `--cov-fail-under=70`，只升不降
 - **规范**：修 bug 必须附带可复现的回归测试随同一提交；新模块合入自带测试；
