@@ -175,11 +175,12 @@ class ContextManager:
         trigger = trigger_turns or self._trigger_turns
         keep = keep_turns or self._keep_turns
 
-        # 分离系统消息
+        # 用 .type 字符串而非 isinstance 判定消息类别：
+        # 测试进程里 langchain_core.messages 偶发被整体重载，isinstance 会跨"代际"类失败
         first_system = next(
-            (m for m in messages if isinstance(m, SystemMessage)), None
+            (m for m in messages if getattr(m, "type", None) == "system"), None
         )
-        non_system_msgs = [m for m in messages if not isinstance(m, SystemMessage)]
+        non_system_msgs = [m for m in messages if getattr(m, "type", None) != "system"]
 
         if not non_system_msgs:
             return ([first_system] if first_system else []), []
@@ -189,7 +190,7 @@ class ContextManager:
         current_turn: list[BaseMessage] = []
 
         for msg in non_system_msgs:
-            if isinstance(msg, HumanMessage):
+            if getattr(msg, "type", None) == "human":
                 if current_turn:
                     turns.append(current_turn)
                 current_turn = [msg]
@@ -518,7 +519,7 @@ class ContextManager:
         """构建发送给LLM的完整消息列表（系统提示词 + 对话历史）"""
         sys_prompt = self.build_system_prompt(summary, agent_name, context_pack=context_pack)
         msgs = [SystemMessage(content=sys_prompt)] + [
-            m for m in final_messages if not isinstance(m, SystemMessage)
+            m for m in final_messages if getattr(m, "type", None) != "system"
         ]
 
         # 编码清理：确保UTF-8兼容

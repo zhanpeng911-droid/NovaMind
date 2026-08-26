@@ -247,8 +247,11 @@ def create_agent_app(
         # 构建发送给LLM的消息列表
         # 使用本轮新生成的summary（如果有），而不是旧的state.summary
         effective_summary = state_updates.get("summary", state.summary)
+        # 用 .type 字符串而非 isinstance 判定消息类别：
+        # 测试进程里 langchain_core.messages 偶发被整体重载，isinstance 会跨"代际"类失败
         latest_user_input = next(
-            (msg.content for msg in reversed(raw_messages) if isinstance(msg, HumanMessage)),
+            (msg.content for msg in reversed(raw_messages)
+             if getattr(msg, "type", None) == "human"),
             "",
         )
         context_pack = context_manager.resolve_context_pack(latest_user_input)
@@ -367,7 +370,8 @@ def create_agent_app(
 
         thread_id = state.metadata.get("thread_id", "system_default")
         latest_user_input = next(
-            (msg.content for msg in reversed(state.messages) if isinstance(msg, HumanMessage)),
+            (msg.content for msg in reversed(state.messages)
+             if getattr(msg, "type", None) == "human"),
             "",
         )
 
