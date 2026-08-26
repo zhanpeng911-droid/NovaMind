@@ -10,6 +10,7 @@ NovaMind Provider 工厂测试
 import unittest
 from unittest.mock import patch
 from novamind.core.provider import get_provider, COMPATIBLE_BASE_URLS
+from _fakes import env_without
 
 
 class TestProviderFactory(unittest.TestCase):
@@ -23,19 +24,16 @@ class TestProviderFactory(unittest.TestCase):
 
     def test_openai_missing_api_key_raises_valueerror(self):
         """OpenAI provider 缺少 API key 时应抛出 ValueError"""
-        with patch.dict("os.environ", {}, clear=True):
-            # 确保 OPENAI_API_KEY 不存在
-            import os
-            os.environ.pop("OPENAI_API_KEY", None)
+        # 只剔除 OPENAI_* 变量，保留系统变量（清空整个 environ 会破坏
+        # uv 独立版 Python 的 OpenSSL 初始化，见 _fakes.env_without 注释）
+        with patch.dict("os.environ", env_without("OPENAI_"), clear=True):
             with self.assertRaises(ValueError) as ctx:
                 get_provider(provider_name="openai", model_name="gpt-4o-mini")
             self.assertIn("OPENAI_API_KEY", str(ctx.exception))
 
     def test_anthropic_missing_api_key_raises_valueerror(self):
         """Anthropic provider 缺少 API key 时应抛出 ValueError"""
-        with patch.dict("os.environ", {}, clear=True):
-            import os
-            os.environ.pop("ANTHROPIC_API_KEY", None)
+        with patch.dict("os.environ", env_without("ANTHROPIC_"), clear=True):
             with self.assertRaises(ValueError) as ctx:
                 get_provider(provider_name="anthropic", model_name="claude-3-haiku")
             self.assertIn("ANTHROPIC_API_KEY", str(ctx.exception))

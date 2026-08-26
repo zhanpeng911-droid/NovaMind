@@ -21,7 +21,7 @@ from langchain_core.messages import (
 )
 from novamind.core.state_machine import AgentState, NovaMindAgent
 from novamind.core.context import ContextManager
-from _fakes import FakeLLM
+from _fakes import FakeLLM, env_without
 
 
 # ==================== Agent Eval 测试 ====================
@@ -389,9 +389,9 @@ class TestAgentEvalProviderErrors(unittest.TestCase):
     def test_openai_missing_key_raises_valueerror(self):
         """OpenAI 缺 API key 抛出 ValueError"""
         from novamind.core.provider import get_provider
-        with patch.dict("os.environ", {}, clear=True):
-            import os
-            os.environ.pop("OPENAI_API_KEY", None)
+        # 只剔除 OPENAI_* 变量，保留系统变量（清空整个 environ 会破坏
+        # uv 独立版 Python 的 OpenSSL 初始化，见 _fakes.env_without 注释）
+        with patch.dict("os.environ", env_without("OPENAI_"), clear=True):
             with self.assertRaises(ValueError) as ctx:
                 get_provider(provider_name="openai", model_name="gpt-4o-mini")
             self.assertIn("OPENAI_API_KEY", str(ctx.exception))
@@ -399,9 +399,7 @@ class TestAgentEvalProviderErrors(unittest.TestCase):
     def test_anthropic_missing_key_raises_valueerror(self):
         """Anthropic 缺 API key 抛出 ValueError"""
         from novamind.core.provider import get_provider
-        with patch.dict("os.environ", {}, clear=True):
-            import os
-            os.environ.pop("ANTHROPIC_API_KEY", None)
+        with patch.dict("os.environ", env_without("ANTHROPIC_"), clear=True):
             with self.assertRaises(ValueError) as ctx:
                 get_provider(provider_name="anthropic", model_name="claude-3-haiku")
             self.assertIn("ANTHROPIC_API_KEY", str(ctx.exception))

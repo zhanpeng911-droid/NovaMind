@@ -20,7 +20,22 @@ bind_tools / 预设响应序列 / 调用历史记录的通用需求。
 """
 from __future__ import annotations
 
+import os
+
 from langchain_core.messages import AIMessage
+
+
+def env_without(*prefixes: str) -> dict[str, str]:
+    """返回剔除指定前缀环境变量后的完整副本，供 patch.dict(os.environ, ..., clear=True) 用。
+
+    不要直接 clear=True 清空整个 environ：Windows 上 uv 独立版 CPython 的
+    OpenSSL 初始化依赖 SystemRoot 等系统变量，全清会让 langchain-openai
+    首次导入时抛 ssl.SSLError（表现为"缺 key"测试误报环境崩溃）。
+    """
+    return {
+        k: v for k, v in os.environ.items()
+        if not any(k.startswith(p) for p in prefixes)
+    }
 
 
 class FakeLLM:

@@ -16,7 +16,7 @@ NovaMind 把"Agent 怎么设计"这件事拆到了每个模块都能独立验证
 
 > 一句话：不是在做功能堆砌，是在认真回答"一个 Agent 内核应该长什么样"——而且还要跑得可信、可追责。
 
-- **Python**：3.10+
+- **Python**：3.12 – 3.13
 - **当前版本**：3.0.0（架构对齐 Poirot）
 - **协议**：MIT License
 
@@ -120,7 +120,7 @@ python -m venv venv
 python -m pip install --upgrade pip
 ```
 
-> 项目要求 Python 3.10 或更高版本。若 PowerShell 阻止激活脚本，可执行 `Set-ExecutionPolicy -Scope Process Bypass` 后重试，或直接使用 `venv\Scripts\python.exe`。
+> 项目要求 Python 3.12 或 3.13（`requires-python = ">=3.12,<3.14"`）。3.14 因 langchain-openai 导入期 SSL 兼容问题暂不支持，待上游修复后复核。若 PowerShell 阻止激活脚本，可执行 `Set-ExecutionPolicy -Scope Process Bypass` 后重试，或直接使用 `venv\Scripts\python.exe`。
 
 ### 2. 安装 NovaMind
 

@@ -8,7 +8,8 @@ version = "2.0.0"
 description = "Transparent AI Agent Framework with built-in observability and zero-trust execution"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.10"
+# 3.14 暂不支持：langchain-openai 在 3.14 导入期 SSL 初始化崩溃（待上游修复后复核放开上限）
+requires-python = ">=3.12,<3.14"
 authors = [
     {name = "NovaMind Contributors"}
 ]
@@ -18,9 +19,8 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
@@ -30,6 +30,10 @@ dependencies = [
     "rich>=13.0.0",
     "prompt_toolkit>=3.0.0",
     "python-dotenv>=1.0.0",
+    "jieba>=0.42.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "pywebview>=5.0",
     "langchain-core>=0.2.0",
     "langchain>=0.2.0",
     "langchain-openai>=0.1.0",
