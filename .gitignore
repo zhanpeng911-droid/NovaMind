@@ -47,5 +47,10 @@ build/
 .pytest_cache/
 .zcode/
 
+# 覆盖率产物
+.coverage
+coverage.xml
+htmlcov/
+
 # 内部 agent 工作目录（会话记忆，不公开）
 .workbuddy/

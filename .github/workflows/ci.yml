@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  tests:
+    name: Pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 与 pyproject requires-python ">=3.12,<3.14" 保持一致；
+        # 3.14 因 langchain-openai 导入期 SSL 崩溃暂排除，上游修复后复核加入
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Sync deps (locked)
+        run: uv sync --extra dev --locked
+
+      - name: Pytest with coverage
+        run: uv run --no-sync pytest tests -q --tb=short --cov=novamind --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage report
+        if: failure() || matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.python-version }}
+          path: coverage.xml
