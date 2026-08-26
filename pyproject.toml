@@ -76,6 +76,8 @@ select = ["E4", "E7", "E9", "F"]
 python_version = "3.12"
 ignore_missing_imports = true
 check_untyped_defs = true
+# 渐进接入：首批只查相对独立模块，被跟随的依赖不报错（错误只算在目标文件头上）
+follow_imports = "silent"
 
 [tool.ruff.lint.per-file-ignores]
 # __init__.py 是公共 API 出口，re-export（含 import *）属预期用法

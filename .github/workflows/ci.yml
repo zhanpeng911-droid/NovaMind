@@ -37,3 +37,41 @@ jobs:
         with:
           name: coverage-${{ matrix.python-version }}
           path: coverage.xml
+
+  lint:
+    name: Ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: pip install uv
+      - name: Sync deps (locked)
+        run: uv sync --extra dev --locked
+      - name: Ruff check
+        run: uv run --no-sync ruff check novamind entry tests
+
+  typecheck:
+    name: Mypy (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true  # 渐进接入：首批文件零错误后再转强制并扩范围
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: pip install uv
+      - name: Sync deps (locked)
+        run: uv sync --extra dev --locked
+      - name: Mypy first batch
+        run: >-
+          uv run --no-sync mypy
+          novamind/core/policy.py
+          novamind/core/token_tracker.py
+          novamind/core/event_bus.py
+          novamind/core/task_store.py
+          novamind/core/skill/types.py
+          novamind/core/sandbox/types.py
