@@ -172,7 +172,7 @@ def build_chat_model(config: ProviderConfig):
         except ImportError:
             raise ProviderConfigError(
                 "langchain-anthropic not installed. Run: pip install langchain-anthropic"
-            )
+            ) from None
         kwargs = {"model": config.model, "api_key": config.api_key}
         if config.base_url:
             kwargs["base_url"] = config.base_url
@@ -184,7 +184,7 @@ def build_chat_model(config: ProviderConfig):
         except ImportError:
             raise ProviderConfigError(
                 "langchain-community not installed. Run: pip install -e '.[ollama]'"
-            )
+            ) from None
         kwargs = {"model": config.model}
         if config.base_url:
             kwargs["base_url"] = config.base_url

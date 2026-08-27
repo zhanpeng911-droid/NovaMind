@@ -90,7 +90,7 @@ class LocalSecurityGuard:
                 f"command has unparseable quoting: {command[:100]}",
                 path=command[:100],
                 operation="validate_command",
-            )
+            ) from None
         if not tokens:
             raise SandboxPermissionError(
                 "empty command", path=command[:100], operation="validate_command"

@@ -252,7 +252,7 @@ def run_gui_command(
             "[bold red]启动失败：缺少 pywebview 依赖！[/bold red]\n"
             "[dim]请运行 pip install pywebview 后重试。[/dim]"
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
     from novamind.webui.app import run_gui
 
@@ -286,7 +286,7 @@ def run_doctor_command(
     if as_json:
         console.print_json(data=report.as_dict())
         if not report.ok:
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from None
         return
 
     for finding in report.findings:
@@ -313,7 +313,7 @@ def run_doctor_command(
     )
 
     if not report.ok:
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
 
 def main():

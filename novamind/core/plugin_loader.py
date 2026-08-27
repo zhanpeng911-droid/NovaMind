@@ -233,9 +233,10 @@ class PluginManager:
             print(f" [警告] 提取元数据失败 {md_path}: {e}")
             return None
 
+    @staticmethod
     @lru_cache(maxsize=50)
-    def _load_content(self, md_path: str, mtime: float) -> str:
-        """加载插件完整内容（带LRU缓存）"""
+    def _load_content(md_path: str, mtime: float) -> str:
+        """加载插件完整内容（带LRU缓存）。staticmethod 使 lru_cache 全局生效且可清空。"""
         with open(md_path, "r", encoding="utf-8") as f:
             return f.read()
 

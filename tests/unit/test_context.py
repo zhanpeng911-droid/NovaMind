@@ -248,7 +248,7 @@ class TestSummaryLLMEvaluation(unittest.TestCase):
         try:
             from langchain_openai import ChatOpenAI
         except ImportError:
-            raise unittest.SkipTest("缺少 langchain-openai 依赖，跳过 LLM 评估测试")
+            raise unittest.SkipTest("缺少 langchain-openai 依赖，跳过 LLM 评估测试") from None
 
         cls.llm = ChatOpenAI(
             model=model,

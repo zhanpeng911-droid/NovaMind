@@ -48,10 +48,12 @@ class SandboxProvider(ABC):
         """返沙箱元信息（含 sandbox_url）。Local 返 None。"""
         return None
 
+    @abstractmethod
     def reset(self) -> None:
         """清缓存，不 shutdown。默认空实现。"""
         pass
 
+    @abstractmethod
     def shutdown(self) -> None:
         """销毁所有沙箱 + 清缓存。默认空实现。"""
         pass

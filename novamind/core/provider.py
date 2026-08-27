@@ -65,7 +65,7 @@ def get_provider(
             raise ImportError(
                 "缺少 langchain-openai 依赖，无法使用 OpenAI 兼容接口。\n"
                 "请执行: pip install langchain-openai"
-            )
+            ) from None
 
         current_api_key = api_key or os.environ.get("OPENAI_API_KEY")
         if not current_api_key:
@@ -93,7 +93,7 @@ def get_provider(
             raise ImportError(
                 "缺少 langchain-anthropic 依赖，无法使用 Anthropic Claude。\n"
                 "请执行: pip install langchain-anthropic"
-            )
+            ) from None
 
         current_api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not current_api_key:
@@ -117,7 +117,7 @@ def get_provider(
             raise ImportError(
                 "缺少 langchain-community 依赖，无法使用 Ollama 本地模型。\n"
                 "请执行: pip install -e '.[ollama]' 或 pip install langchain-community"
-            )
+            ) from None
 
         final_base_url = base_url or os.environ.get(
             "OLLAMA_BASE_URL", "http://localhost:11434"
