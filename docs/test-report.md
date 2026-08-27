@@ -269,3 +269,43 @@ GitHub Actions：pytest 矩阵 3.12/3.13（`--locked`，覆盖率产物上传）
 1. ConversationStore SQLite 连接泄漏（Windows 文件锁）
 2. langchain_core.messages 进程内重载导致的 isinstance 代际分裂（改 `.type` duck-typing）
 3. 测试清空整个 os.environ 剥掉 SystemRoot 致 uv 版 OpenSSL 崩溃（4 处）
+
+
+---
+
+## 八、质量保障专项执行报告 R2（QUALITY_ASSURANCE_PLAN_R2 全量落地）
+
+> 执行日期：2026-08-26。逐任务独立提交；起点快照数字全部实测核对一致。
+
+### P0-A（e2f117c）
+- branch protection 已通过 GitHub API 配置：必需 Pytest(py3.12/3.13)+Ruff，typecheck 不计入，enforce_admins=false 保留管理员直推
+- CI 覆盖底线 70→74；app.py 编排测试 42%→**100%**（修正方案误设的 TestClient 手段，改 mock uvicorn/webview）；pre-commit 接入（ruff + unit 冒烟）
+
+### P1 覆盖（B1-B4）
+| 模块 | 前 → 后 |
+|---|---|
+| store/selector/parser/checks | 62/52/70/65 → **97/98/98/98%** |
+| docker provider / cross-process lock / sandbox_tools | 59/50/55 → **95/100/97%** |
+| plugin_loader | 57 → **95%** |
+| programmatic_bridge / permissive_guard / identity_translator | 67/67/62 → **100%** |
+| 总覆盖 | 75 → **81%**，CI 底线 74→**78** |
+
+新增 hypothesis 属性测试（translators）：Local「翻译结果永不逃逸工位根」+「mask 为 translate 逆操作」、Docker「reverse 必落 host 根 + 前缀外必拒」，各 150 例随机。
+
+### P2 工具链
+- mypy 第二批 9 文件零错误，typecheck job 转强制
+- ruff 规则集 +B（bugbear）并清零（8×B904 from None、2×B027 abstract、1×B019 lru_cache 泄漏）
+- mutmut 变异试点：**暂缓**（不支持原生 Windows，需 WSL），命令与说明记入遗留 #5
+
+### P3 功能债（三件全落地）
+- 记忆 storage_path 收敛统一数据根（跨 CWD 同位置）+ 旧数据一次性迁移
+- save_user_profile 备份加毫秒（同秒不合并）
+- TASKS_FILE 单一来源（测试只需 patch 一处）
+
+### 附带修复的真 bug
+- plugin_loader.reload_all cache_clear 绑定方法 AttributeError（ad05e8e）
+- 固定 thread_id 跨运行累积致裁剪误判（006084a）
+- langchain 消息类重载代际分裂 15 处 isinstance 全库根治（006084a）
+
+### 测试规模演进
+459 → **561**（unit/integration 两层；全程 `--cov --cov-fail-under=78` 稳定全绿）

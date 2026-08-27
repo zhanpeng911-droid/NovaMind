@@ -108,4 +108,10 @@
 
 ## 五、遗留问题登记（本轮执行中发现的新问题记在这里）
 
-- （执行方填写）
+- **#1 register() 静默丢弃构造器四计数器（设计使然，留档）**：SQLiteSkillStore.register 只写身份不落计数器，计数器仅经 record_outcome 累积。行为符合设计，但构造器传入的 sel/app/comp/fb 被静默忽略，测试需直连 UPDATE 造数。已按真实语义写测试，不修。
+- **#2 plugin_loader.reload_all 真 bug（已修复，ad05e8e）**：`self._load_content.cache_clear()` 中 lru_cache 包装器的 cache_clear 挂在函数上，实例访问得到绑定方法（无该属性），reload_skills() 一调即 AttributeError。改类级访问。
+- **#3 固定 thread_id 累积致裁剪误判（已修复，006084a）**：policy_test 等固定 id 在 workspace SQLite 跨运行累积超 40 回合，触发裁剪裁掉用户消息 → 策略判定失效。相关测试改唯一 id + 清理。测试卫生待统一（历史遗留固定 id 测试）。
+- **#4 langchain 消息类重载代际分裂（已根治，006084a）**：上轮修 agent/context 后，路由与 tool_executor 及 context_engineering/middlewares 仍残留 15 处 isinstance；本轮全库鸭子化 .type。带 --cov 全量连跑稳定。
+- **#5 mutmut 变异测试试点暂缓（未执行，可选）**：mutmut 不支持原生 Windows（需 WSL）。本轮未在 WSL 搭建变异环境。执行命令（WSL 内）：`cd /mnt/d/claudecode/NovaMind && uv sync --extra dev && uv run python -m mutmut run --paths-to-mutate novamind/core/policy.py novamind/core/token_tracker.py novamind/core/memory/strategies/default/decay.py --runner "uv run --no-sync python -m pytest tests/unit/test_token_tracker.py tests/unit/test_agent.py::TestHarnessPolicy tests/unit/test_memory.py::TestDecay tests/unit/test_memory.py::TestDecayMathInvariants -q" --use-coverage`。不设门槛、不进 CI。
+- **#6 测试常写真实 DB_PATH**：大量历史测试用固定/真实 workspace SQLite，CI 全新环境不受影响，但本地反复跑会累积状态。建议后续引入 `tmp_path` + 全局 DB_PATH 夹具统一隔离。
+
