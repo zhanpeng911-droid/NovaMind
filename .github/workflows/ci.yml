@@ -29,7 +29,7 @@ jobs:
         run: uv sync --extra dev --locked
 
       - name: Pytest with coverage
-        run: uv run --no-sync pytest tests -q --tb=short --cov=novamind --cov-report=term-missing --cov-report=xml --cov-fail-under=78
+        run: uv run --no-sync pytest tests -q --tb=short --ignore=tests/functional --cov=novamind --cov-report=term-missing --cov-report=xml --cov-fail-under=78
 
       - name: Upload coverage report
         if: failure() || matrix.python-version == '3.12'

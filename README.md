@@ -274,6 +274,8 @@ novamind doctor --json                       # 运行时自检
 
 可选：`uv run --no-sync pre-commit install` 启用 Git 钩子（提交前 ruff 检查、推送前单元测试冒烟）。
 
+**发布前必跑（真实 LLM 全功能验收）**：`uv run --no-sync pytest tests/functional -q`（Part A/B/C，缺 key 自动跳过；当前已知缺陷见 `docs/functional-report.md` 缺陷登记：L4 检索索引未接线、默认运行时记忆中间件未接线、docker daemon 需启动）。CI 不跑 functional，属发布前手动门禁。
+
 - **Python**：3.12–3.13（CI 矩阵同版本；3.14 因 langchain-openai 导入期 SSL 崩溃暂排除）
 - **覆盖率**：全量约 81%，CI 底线 `--cov-fail-under=78`，只升不降
 - **规范**：修 bug 必须附带可复现的回归测试随同一提交；新模块合入自带测试；
