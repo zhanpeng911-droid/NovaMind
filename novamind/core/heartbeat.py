@@ -16,8 +16,7 @@ import os
 import asyncio
 import calendar
 from datetime import datetime, timedelta
-from .config import TASKS_FILE
-from .task_store import TASKS_LOCK, load_tasks_unlocked, write_tasks_unlocked
+from .task_store import TASKS_FILE, TASKS_LOCK, load_tasks_unlocked, write_tasks_unlocked
 
 
 async def pacemaker_loop(
