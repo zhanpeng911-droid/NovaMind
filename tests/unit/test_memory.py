@@ -250,7 +250,7 @@ class TestHybridRetriever(unittest.TestCase):
         self.decay = EbbinghausDecayPolicy()
         self.retriever = HybridRetriever(self.store, self.decay)
         # 真实装配：bootstrap._wrap_store 让 store 变更触发 retriever 增量索引
-        from novamind.core.memory.bootstrap import _wrap_store
+        from novamind.core.memory.strategies.default.strategy import _wrap_store
 
         _wrap_store(self.store, self.retriever)
 

@@ -92,3 +92,49 @@ from novamind.core.memory.config import get_memory_config  # noqa: E402
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRecallIndexWiring(unittest.TestCase):
+    """缺陷#1 回归：build_default_provider 默认路径必须把 encode 后的记忆接进检索索引。"""
+
+    def test_encode_then_retrieve_hits(self):
+        import tempfile as _tf
+        from novamind.core.memory.config import MemoryConfig, get_memory_config as _gm, set_memory_config as _sm
+        from novamind.core.memory.strategies.default.strategy import build_default_provider
+        from novamind.core.memory.schema import MemoryType
+        from novamind.core.memory.types import MemoryQuery
+
+        tmp = _tf.TemporaryDirectory()
+        old = _gm()
+        _sm(MemoryConfig(storage_path=str(Path(tmp.name) / "mem")))
+        try:
+            provider = build_default_provider()
+            provider._manager.encode("用户的小名叫豆豆", type=MemoryType.SEMANTIC, importance=0.9)
+            hits = provider.retriever().retrieve(MemoryQuery(text="我的小名叫什么"))
+            self.assertGreaterEqual(len(hits), 1, "encode 后未进入检索索引（缺陷#1 复发）")
+        finally:
+            _sm(old)
+            tmp.cleanup()
+
+    def test_wrap_store_is_idempotent(self):
+        import tempfile as _tf
+        from novamind.core.memory.config import MemoryConfig, get_memory_config as _gm, set_memory_config as _sm
+        from novamind.core.memory.strategies.default.strategy import build_default_provider
+        from novamind.core.memory.schema import MemoryType
+        from novamind.core.memory.types import MemoryQuery
+
+        tmp = _tf.TemporaryDirectory()
+        old = _gm()
+        _sm(MemoryConfig(storage_path=str(Path(tmp.name) / "mem")))
+        try:
+            p1 = build_default_provider()
+            self.assertIn(id(p1._retriever), p1._store._wired_retrievers)
+            # 二次调用 build（同 store 场景）不会重复包装
+            p2 = build_default_provider(store=p1._store)
+            self.assertIn(id(p2._retriever), p2._store._wired_retrievers)
+            p2._manager.encode("重复包装检测", type=MemoryType.EPISODIC, importance=0.5)
+            hits = p2.retriever().retrieve(MemoryQuery(text="重复包装检测"))
+            self.assertGreaterEqual(len(hits), 1)
+        finally:
+            _sm(old)
+            tmp.cleanup()

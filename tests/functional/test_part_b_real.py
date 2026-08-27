@@ -314,8 +314,6 @@ def test_b9_model_router_real_fallback():
 
 
 # ── B10 真实召回注入影响回答 ───────────────────────────────────
-@pytest.mark.xfail(reason="缺陷#1：build_default_provider 未对 store 做 _wrap_store 接线，"
-                           "encode 后记忆不进检索索引，retrieve 恒 0 命中")
 def test_b10_real_recall_injection():
     import tempfile as _tf
     from novamind.core.memory.config import MemoryConfig, get_memory_config, set_memory_config

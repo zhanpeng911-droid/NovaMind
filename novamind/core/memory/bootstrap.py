@@ -87,7 +87,7 @@ def get_memory_worker() -> Any:
 
 
 def _load_memory_provider(config: Any) -> Any:
-    from .strategies.default.strategy import build_default_provider
+    from .strategies.default.strategy import _wrap_store, build_default_provider
 
     journal = _make_journal_callback()
     provider = build_default_provider(journal=journal)
@@ -99,31 +99,3 @@ def _make_journal_callback() -> Any:
     return None  # NovaMind 暂无 RunJournal 注入，后续接入审计时补充
 
 
-def _wrap_store(store: Any, retriever: Any) -> None:
-    """装饰器模式：包装 store 变更方法后调 retriever.on_trace_*（5B 增量索引）。"""
-    original_add = store.add
-    original_update = store.update
-    original_batch_update = store.batch_update
-    original_remove = store.remove
-
-    def wrapped_add(trace: Any) -> None:
-        original_add(trace)
-        retriever.on_trace_added(trace)
-
-    def wrapped_update(trace: Any) -> None:
-        original_update(trace)
-        retriever.on_trace_updated(trace)
-
-    def wrapped_batch_update(traces: list) -> None:
-        original_batch_update(traces)
-        for t in traces:
-            retriever.on_trace_updated(t)
-
-    def wrapped_remove(trace_id: str) -> None:
-        original_remove(trace_id)
-        retriever.on_trace_removed(trace_id)
-
-    store.add = wrapped_add
-    store.update = wrapped_update
-    store.batch_update = wrapped_batch_update
-    store.remove = wrapped_remove

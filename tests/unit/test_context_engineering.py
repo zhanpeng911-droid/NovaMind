@@ -152,7 +152,7 @@ class TestPersonaBridge(unittest.TestCase):
         self.decay = EbbinghausDecayPolicy()
         self.manager = DefaultMemoryManager(store=self.store, decay_policy=self.decay)
         self.retriever = HybridRetriever(self.store, self.decay)
-        from novamind.core.memory.bootstrap import _wrap_store
+        from novamind.core.memory.strategies.default.strategy import _wrap_store
 
         _wrap_store(self.store, self.retriever)
 

@@ -21,6 +21,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from novamind.core.agent import create_agent_app
+from novamind.core.provider import get_provider
+from novamind.core.middlewares.default_stack import build_default_middlewares
 from novamind.core.config import DB_PATH, LOG_DIR, SKILL_DB_PATH
 from novamind.core.state_machine import ConversationStore
 
@@ -89,7 +91,10 @@ def get_agent() -> Any:
     global _agent
     if _agent is None:
         provider, model = _load_env()
-        _agent = create_agent_app(provider_name=provider, model_name=model)
+        # 缺陷#2 修复：默认 GUI 后端也挂载记忆/治理中间件
+        llm = get_provider(provider_name=provider, model_name=model)
+        _agent = create_agent_app(provider_name=provider, model_name=model,
+                                  middlewares=build_default_middlewares(llm))
     return _agent
 
 

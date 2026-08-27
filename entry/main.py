@@ -27,6 +27,8 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.application import get_app
 
 from novamind.core.agent import create_agent_app
+from novamind.core.provider import get_provider
+from novamind.core.middlewares.default_stack import build_default_middlewares
 from novamind.core.event_bus import event_bus
 from novamind.core.heartbeat import pacemaker_loop
 from novamind.core.skill.evolution.flag import evolution_notice
@@ -150,9 +152,12 @@ async def async_main(thread_id: str | None = None):
 
     bus = event_bus
 
+    # 缺陷#2 修复：默认 CLI 运行时挂载记忆（L4/L5）与上下文治理中间件
+    llm = get_provider(provider_name=current_provider, model_name=current_model)
     agent = create_agent_app(
         provider_name=current_provider,
         model_name=current_model,
+        middlewares=build_default_middlewares(llm),
     )
     if not thread_id:
         thread_id = generate_thread_id()

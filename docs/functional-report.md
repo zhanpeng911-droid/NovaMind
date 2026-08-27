@@ -12,7 +12,7 @@
 | A2 | 自研编排（10 轮工具收敛 + 迭代上限） | 自动 | ✅ PASS | 10 轮工具调用自然收敛；死循环被上限终止并审计 system_action |
 | A3 | 横切中间件五钩子 | 自动 | ✅ PASS | before/after_agent、before/after_model 按序触发；新增中间件不改默认行为 |
 | A4 | 模型路由 + 链式降级 | 自动+B | ✅ PASS | 见 B2/B9 |
-| A5 | 五层记忆 L1-L5 | 自动(mock)+B | ⚠️ 部分 | L1-L3 机制全通；L4/L5 模块可用但**默认运行时未接线**（缺陷#2），且 L4 检索增量索引断裂（缺陷#1，B10 xfail 佐证） |
+| A5 | 五层记忆 L1-L5 | 自动(mock)+B | ✅ PASS | 缺陷#1/#2 已修复：L4 检索索引接线、默认运行时已挂载记忆/治理中间件，B10 转绿（见修复记录） |
 | A6 | 三组件沙箱 Local | 自动+属性测试 | ✅ PASS | 零信任拦截/路径穿越/白名单/翻译全通 |
 | A7 | 上下文治理 P0-P5 | 自动+B | ✅ PASS | governance 中间件真实长对话跑通（B5） |
 | A8 | 技能系统 37 内置 | 自动 | ✅ PASS | 37 个 SKILL.md 全加载 |
@@ -28,7 +28,7 @@
 | A18 | WSL2 executor 路径翻译 | C | ✅ PASS | `D:\foo`→`/mnt/d/foo` 纯函数恒生效；executor 需显式开启（缺陷#4 配置依赖） |
 | A19 | GUI 桌面窗口 | C | ⏭️ 跳过 | 无头会话无法交互；webview 导入正常，留手工 checklist |
 
-**计数：PASS 15 / 部分 1（A5）/ FAIL 1（A17 环境）/ 跳过 2（A14、A19）**
+**计数：PASS 16 / FAIL 1（A17 环境）/ 跳过 2（A14、A19）**
 
 ## 二、Part A 细节（无外部依赖，10 项 functional 用例 + 复用既有套件）
 
@@ -52,7 +52,7 @@
 | B7 delegate_to_pi 真实 | ✅ | pi 委派返回结构化结果 |
 | B8 审计完整重放 | ✅ | 事件序列完整、无密钥泄漏 |
 | B9 模型路由真降级+兜底 | ✅ | is_default 恒在链尾，死端点切真 |
-| **B10 真实召回注入** | ❌ xfail | **缺陷#1**：encode 后记忆不进入检索索引，retrieve 恒 0 命中 |
+| **B10 真实召回注入** | ✅ PASS | 缺陷#1 修复后：encode → 检索命中 → 召回注入生效 |
 | B11 摘要 LLM 二次评估 | ✅ | llm_verdict 产出 |
 | B12 上下文包影响回答 | ✅ | 回答体现 docs 内容 |
 | B13 用户画像进入回答 | ✅ | 画像内容被模型引用 |
@@ -85,3 +85,13 @@ uv run --no-sync pytest tests/functional -q          # 全功能验收（Part A/
 ```
 
 CI 已 `--ignore=tests/functional`：功能验收属发布前手工门禁，不占日常回归。
+
+
+---
+
+## 七、修复记录（缺陷 #1 / #2 已修复）
+
+- **缺陷#1（高，L4 检索索引断裂）已修复**：`build_default_provider` 引入幂等的 `_wrap_store`（按 retriever 记 `_wired_retrievers` 集合防重复包装），与 bootstrap 收敛为单一实现；默认路径 encode 后记忆即进索引。回归单测 `TestRecallIndexWiring`（encode→retrieve 命中 / 重复 build 幂等）。B10 由 xfail 转 **PASS**，Part B 19/19 全绿。
+- **缺陷#2（中，默认运行时未接线）已修复**：新增 `middlewares/default_stack.py#build_default_middlewares(llm)`（记忆召回 + 沉淀 worker + 上下文治理），接入 `entry/main.py` 与 `webui/server.py` 的默认运行时。内核 `create_agent_app` 保持精简（显式传参才启用）；webui / Part A 既有测试 48 项全部兼容。
+- 常规回归：**563 passed**（functional 从 CI 排除），覆盖底线 78 不变；Part B 真实 LLM 19/19。
+- 遗留：缺陷#3（docker daemon 未启动，环境）、#4（WSL executor 需显式开启，配置依赖）、#5（worker 抽取类型由 LLM 自判，留观）。

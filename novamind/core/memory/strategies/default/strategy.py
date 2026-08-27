@@ -66,6 +66,45 @@ class DefaultMemoryProvider:
             self._retriever.shutdown()
 
 
+def _wrap_store(store, retriever) -> None:
+    """把 store 的增/改/批量改/删包装为 retriever 增量索引更新（按 retriever 幂等）。
+
+    缺陷#1 修复：build_default_provider 默认路径此前未接线，encode 后新记忆
+    不进入 HybridRetriever 索引，retrieve 恒 0 命中。bootstrap 同用本函数，单一来源。
+    """
+    wired = getattr(store, "_wired_retrievers", None)
+    if wired is None:
+        wired = store._wired_retrievers = set()
+    rid = id(retriever)
+    if rid in wired:
+        return  # 该 retriever 已接线，避免重复包装
+    wired.add(rid)
+
+    originals = {m: getattr(store, m) for m in ("add", "update", "batch_update", "remove")}
+
+    def wrapped_add(trace):
+        originals["add"](trace)
+        retriever.on_trace_added(trace)
+
+    def wrapped_update(trace):
+        originals["update"](trace)
+        retriever.on_trace_updated(trace)
+
+    def wrapped_batch_update(traces):
+        originals["batch_update"](traces)
+        for t in traces:
+            retriever.on_trace_updated(t)
+
+    def wrapped_remove(trace_id):
+        originals["remove"](trace_id)
+        retriever.on_trace_removed(trace_id)
+
+    store.add = wrapped_add
+    store.update = wrapped_update
+    store.batch_update = wrapped_batch_update
+    store.remove = wrapped_remove
+
+
 def build_default_provider(
     *,
     store: MemoryStore | None = None,
@@ -85,6 +124,9 @@ def build_default_provider(
         store = MarkdownFileStore(root)
     if retriever is None:
         retriever = HybridRetriever(store, decay)
+
+    # 缺陷#1 修复：默认路径也接入增量索引（幂等，调用方已接线的 store 不受影响）
+    _wrap_store(store, retriever)
 
     manager = DefaultMemoryManager(
         store=store,
