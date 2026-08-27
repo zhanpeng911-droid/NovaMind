@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.messages import AIMessage
 
 
 class BudgetTrackerExecutor:
@@ -31,7 +30,7 @@ class BudgetTrackerExecutor:
         budget["window"] = window
 
         for msg in messages:
-            if isinstance(msg, AIMessage) and msg.id:
+            if getattr(msg, "type", None) == "ai" and msg.id:
                 usage = getattr(msg, "usage_metadata", None) or {}
                 in_t = usage.get("input_tokens", 0)
                 out_t = usage.get("output_tokens", 0)

@@ -45,6 +45,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "hypothesis>=6",
     "mypy>=1.10",
     "pre-commit>=3",
     "pytest>=7.0",

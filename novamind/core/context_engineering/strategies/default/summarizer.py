@@ -65,20 +65,20 @@ class SummarizerExecutor:
     def _strip_orphan_tools(preserved: list) -> tuple[list, list]:
         ai_tc_ids: set[str] = set()
         for msg in preserved:
-            if isinstance(msg, AIMessage):
+            if getattr(msg, "type", None) == "ai":
                 for tc in msg.tool_calls or []:
                     tc_id = tc.get("id") if isinstance(tc, dict) else None
                     if tc_id:
                         ai_tc_ids.add(tc_id)
         tool_ids: set[str] = set()
         for msg in preserved:
-            if isinstance(msg, ToolMessage):
+            if getattr(msg, "type", None) == "tool":
                 tool_ids.add(msg.tool_call_id)
         clean: list = []
         orphans: list = []
         for msg in preserved:
-            is_orphan_tool = isinstance(msg, ToolMessage) and msg.tool_call_id not in ai_tc_ids
-            is_orphan_ai = isinstance(msg, AIMessage) and bool(msg.tool_calls) and not all(
+            is_orphan_tool = getattr(msg, "type", None) == "tool" and msg.tool_call_id not in ai_tc_ids
+            is_orphan_ai = getattr(msg, "type", None) == "ai" and bool(msg.tool_calls) and not all(
                 (tc.get("id") if isinstance(tc, dict) else None) in tool_ids
                 for tc in msg.tool_calls
             )

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 
-from langchain_core.messages import HumanMessage
 
 from ..memory.worker import MemoryTask, MemoryWorker
 from .protocol import BaseAgentMiddleware, MiddlewareContext, MiddlewareResult
@@ -30,7 +29,7 @@ class MemoryConsolidationMiddleware(BaseAgentMiddleware):
         if not messages and ctx.state is not None:
             messages = getattr(ctx.state, "messages", []) or []
 
-        user_turn_count = sum(1 for m in messages if isinstance(m, HumanMessage) and m.name != "memory_recall")
+        user_turn_count = sum(1 for m in messages if getattr(m, "type", None) == "human" and m.name != "memory_recall")
         if user_turn_count == 0 or user_turn_count % self._n != 0:
             return None
 

@@ -114,7 +114,7 @@ class DefaultStrategy:
 
         if "P5" in pending and not warned:
             last_ai = next(
-                (m for m in reversed(messages) if isinstance(m, AIMessage) and getattr(m, "tool_calls", None)),
+                (m for m in reversed(messages) if getattr(m, "type", None) == "ai" and getattr(m, "tool_calls", None)),
                 None,
             )
             if last_ai:
@@ -136,7 +136,7 @@ class DefaultStrategy:
 
     def wrap_tool_call(self, ctx: GovernanceContext) -> GovernanceResult:
         tool_result = ctx.tool_result
-        if isinstance(tool_result, ToolMessage):
+        if getattr(tool_result, "type", None) == "tool":
             rewritten = self._externalizer.externalize_if_needed(tool_result)
             if rewritten is not None:
                 return GovernanceResult(override=rewritten)
@@ -144,10 +144,10 @@ class DefaultStrategy:
 
     @staticmethod
     def _ensure_pairing(messages: list) -> list | None:
-        tool_msg_ids = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
+        tool_msg_ids = {m.tool_call_id for m in messages if getattr(m, "type", None) == "tool"}
         patch = []
         for msg in messages:
-            if isinstance(msg, AIMessage):
+            if getattr(msg, "type", None) == "ai":
                 for tc in msg.tool_calls or []:
                     tc_id = tc.get("id") if isinstance(tc, dict) else None
                     if tc_id and tc_id not in tool_msg_ids:

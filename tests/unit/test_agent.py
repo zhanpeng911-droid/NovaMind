@@ -180,6 +180,8 @@ class TestHarnessPolicy(unittest.TestCase):
 
     def test_tool_executor_emits_policy_violation(self):
         async def _test():
+            import uuid
+            tid = f"policy_{uuid.uuid4().hex[:8]}"  # 唯一 id，避免跨运行 SQLite 累积触发裁剪
             audit = FakeAuditLogger()
             fake_llm = FakeLLM(responses=[
                 AIMessage(
@@ -198,7 +200,8 @@ class TestHarnessPolicy(unittest.TestCase):
                     audit_logger=audit,
                     tools=[],
                 )
-                result = await agent.run("把这个文件覆盖全部并删除旧内容", thread_id="policy_test")
+                result = await agent.run("把这个文件覆盖全部并删除旧内容", thread_id=tid)
+                agent.clear_conversation(tid)
 
             violation_events = audit.get_events("policy_violation")
             self.assertEqual(len(violation_events), 1)

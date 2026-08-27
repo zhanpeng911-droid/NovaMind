@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import ToolMessage
 
 from ._constants import CST
 
@@ -70,7 +70,7 @@ class ExternalizerExecutor:
         candidates: list[tuple[int, ToolMessage]] = []
 
         for turn_idx in range(exempt_start):
-            tool_msgs = [(mi, m) for mi, m in turns[turn_idx] if isinstance(m, ToolMessage)]
+            tool_msgs = [(mi, m) for mi, m in turns[turn_idx] if getattr(m, "type", None) == "tool"]
             if len(tool_msgs) <= 1:
                 continue
             for mi, m in tool_msgs[:-1]:
@@ -99,7 +99,7 @@ class ExternalizerExecutor:
         turns: list[list[tuple[int, Any]]] = []
         current: list[tuple[int, Any]] = []
         for i, msg in enumerate(messages):
-            if isinstance(msg, HumanMessage):
+            if getattr(msg, "type", None) == "human":
                 if current:
                     turns.append(current)
                 current = [(i, msg)]

@@ -82,7 +82,7 @@ class MemoryRecallMiddleware(BaseAgentMiddleware):
         if not messages and ctx.state is not None:
             messages = getattr(ctx.state, "messages", []) or []
         for msg in reversed(messages):
-            if isinstance(msg, HumanMessage) and msg.name != "memory_recall":
+            if getattr(msg, "type", None) == "human" and msg.name != "memory_recall":
                 content = msg.content
                 if isinstance(content, str):
                     return content

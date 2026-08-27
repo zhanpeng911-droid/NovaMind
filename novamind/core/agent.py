@@ -13,7 +13,7 @@ import asyncio
 import uuid
 from typing import Any
 from langchain_core.messages import (
-    AIMessage, ToolMessage, RemoveMessage
+    ToolMessage, RemoveMessage
 )
 from .state_machine import AgentState, NovaMindAgent, ConversationStore
 from .middleware import MiddlewarePipeline, MiddlewareContext, timing_middleware, logging_middleware
@@ -92,7 +92,7 @@ def _build_route_function(llm_with_tools):
     """
     def route(state: AgentState) -> str:
         last_msg = state.messages[-1] if state.messages else None
-        if last_msg and isinstance(last_msg, AIMessage) and last_msg.tool_calls:
+        if last_msg and getattr(last_msg, "type", None) == "ai" and last_msg.tool_calls:
             return "tools"
         return "__end__"
     return route
@@ -365,7 +365,7 @@ def create_agent_app(
     async def tool_executor(state: AgentState) -> dict[str, Any]:
         """工具执行节点：从最后一条AI消息中提取tool_calls并执行"""
         last_msg = state.messages[-1] if state.messages else None
-        if not last_msg or not isinstance(last_msg, AIMessage) or not last_msg.tool_calls:
+        if not last_msg or not getattr(last_msg, "type", None) == "ai" or not last_msg.tool_calls:
             return {"messages": []}
 
         thread_id = state.metadata.get("thread_id", "system_default")

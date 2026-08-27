@@ -243,7 +243,6 @@ class TestSkillSelector(unittest.TestCase):
 
     def test_llm_failure_falls_back_to_effective_rate_ranking(self):
         many = [(self._skill(f"s{i}", comp=7 + i)) for i in range(5)]  # 全部高于阈值，s4 最高
-        broken = MagicMock = None  # noqa: F841 占位防误用
         from unittest.mock import MagicMock
         llm = MagicMock()
         llm.invoke.side_effect = RuntimeError("api down")
