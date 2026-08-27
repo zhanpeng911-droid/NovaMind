@@ -12,14 +12,13 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from conftest import (
     Timed,
     build_real_llm,
-    has_real_llm,
 )
 
 pytestmark = pytest.mark.real_api
@@ -118,7 +117,6 @@ def test_b3_skill_evolution_real_chain():
     from novamind.core.skill.evolution.gates.score_delta_gate import ScoreDeltaGate
     from novamind.core.skill.evolution.manager import EvolutionManager
     from novamind.core.skill.evolution.eval.programmatic_bridge import ProgrammaticEvalBridge
-    from novamind.core.skill.evolution.types import EvolutionContext
 
     llm = build_real_llm()
     tmp = _tf.TemporaryDirectory()
@@ -140,10 +138,6 @@ def test_b3_skill_evolution_real_chain():
             "total_completions=5,total_fallbacks=15 WHERE skill_id='calc__builtin'")
         store._conn.commit()
 
-        ctx = EvolutionContext(trigger="METRIC", evolution_type="FIX",
-                               target_skill=baseline,
-                               failure_evidence=(),
-                               fix_direction="用户经常触发策略拦截，需强化输入校验说明")
         manager = EvolutionManager(
             store=store,
             triggers=[],
@@ -168,7 +162,6 @@ def test_b3_skill_evolution_real_chain():
 # ── B4 L5 记忆沉淀真实链路 ─────────────────────────────────────
 def test_b4_l5_memory_real_consolidation():
     import tempfile as _tf
-    from langchain_core.messages import HumanMessage
     from novamind.core.memory.config import MemoryConfig, get_memory_config, set_memory_config
     from novamind.core.memory.strategies.default.strategy import build_default_provider
     from novamind.core.middlewares.memory_recall_middleware import MemoryRecallMiddleware
@@ -288,7 +281,7 @@ def test_b8_audit_replay_real():
             real_logger.shutdown()
             AuditLogger._instance = None
 
-        lines = [json.loads(l) for l in (Path(tmp.name) / f"{tid}.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+        lines = [json.loads(ln) for ln in (Path(tmp.name) / f"{tid}.jsonl").read_text(encoding="utf-8").splitlines() if ln.strip()]
         events = [e["event"] for e in lines]
         assert "ai_message" in events
         assert "llm_input" in events
@@ -396,7 +389,6 @@ def test_b13_user_profile_real():
     from langchain_core.messages import AIMessage
     from _fakes import FakeAuditLogger
     import novamind.core.tools.builtins as builtins_mod
-    from novamind.core.config import MEMORY_DIR, PROFILE_PATH, PROFILE_BACKUP_DIR
     llm = build_real_llm()
     tmp = tempfile.TemporaryDirectory()
     prof = str(Path(tmp.name) / "mem" / "user_profile.md")

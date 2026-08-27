@@ -13,7 +13,6 @@ import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from _fakes import FakeAuditLogger, FakeLLM
 from conftest import PROJECT_ROOT
@@ -264,7 +263,7 @@ class TestA13Heartbeat(unittest.TestCase):
 
     def test_a13_due_task_triggered_and_repeat_exhausted(self):
         from novamind.core.heartbeat import pacemaker_loop
-        from datetime import datetime, timedelta
+        from datetime import datetime
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         tasks = [
             {"id": "t1", "target_time": now, "description": "一次任务",
