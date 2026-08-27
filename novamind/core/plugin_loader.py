@@ -329,7 +329,9 @@ class PluginManager:
 
     def reload_all(self) -> list[StructuredTool]:
         """强制重新扫描并清除缓存"""
-        self._load_content.cache_clear()
+        # lru_cache 包装器的 cache_clear 挂在函数上，经实例访问会变成绑定方法
+        # （没有 cache_clear 属性），必须用类级别访问。
+        type(self)._load_content.cache_clear()
         self._plugins.clear()
         return self.get_all_tools(force_rescan=True)
 
