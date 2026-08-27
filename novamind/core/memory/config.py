@@ -5,7 +5,8 @@
 - STARTUP_ONLY 仅 4 字段：use/storage_path/vector_store/graph_store 换需重启
 - frozen + dict 内部可变矛盾解决：dict 视为不可变，改参数 = 构造新 MemoryConfig + 整替
 
-已敲定：storage_path 默认 `.novamind/memory`（沿用 Poirot `.poirot/` 风格）。
+已敲定：storage_path 默认 `memory_traces`，相对路径收敛到统一数据根（不再跟随 CWD），
+显式绝对路径仍可覆盖；旧版 `.novamind/memory` 相对 CWD 的数据在首次构建时一次性迁移。
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ class MemoryConfig:
     """长期记忆配置（frozen，runtime 切走整替）。"""
 
     use: str = ""                              # 主 Provider 实现类，空=禁用；默认 "default"
-    storage_path: str = ".novamind/memory"     # Markdown 持久化根（truth source，总在）
+    storage_path: str = "memory_traces"      # Markdown 持久化根（truth source，总在；相对路径按统一数据根解析）
     enable_recall: bool = True                 # before_model 召回（L4）
     enable_extract: bool = False               # after_model 实时抽取（默认关，走 L5）
     token_budget: int = 2000                   # 召回注入 token 上限
