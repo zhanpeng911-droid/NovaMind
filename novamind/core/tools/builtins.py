@@ -17,7 +17,8 @@ import operator
 import os
 import shutil
 import uuid
-from ..config import MEMORY_DIR, TASKS_FILE, PROFILE_PATH, PROFILE_BACKUP_DIR
+from ..config import MEMORY_DIR, PROFILE_PATH, PROFILE_BACKUP_DIR
+from .. import task_store
 from ..task_store import TASKS_LOCK, load_tasks_unlocked, write_tasks_unlocked
 from .sandbox_tools import (
     list_office_files,
@@ -125,7 +126,8 @@ def _backup_profile_if_exists() -> None:
         return
 
     os.makedirs(PROFILE_BACKUP_DIR, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # 含毫秒，消除同秒内连续保存合并为一个备份的问题
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     backup_path = os.path.join(PROFILE_BACKUP_DIR, f"user_profile.{timestamp}.md")
     shutil.copy2(PROFILE_PATH, backup_path)
 
@@ -286,7 +288,7 @@ def list_scheduled_tasks() -> str:
     当用户询问"我都有哪些任务"、"查一下闹钟"、"刚才定了什么"时调用此工具。
     """
     with TASKS_LOCK:
-        if not os.path.exists(TASKS_FILE):
+        if not os.path.exists(task_store.TASKS_FILE):
             return "当前没有任何定时任务。"
 
         try:
@@ -321,7 +323,7 @@ def delete_scheduled_task(task_id: str) -> str:
     严禁自作主张执行批量删除。
     """
     with TASKS_LOCK:
-        if not os.path.exists(TASKS_FILE):
+        if not os.path.exists(task_store.TASKS_FILE):
             return "删除失败：任务列表文件不存在。"
 
         try:
@@ -352,7 +354,7 @@ def modify_scheduled_task(
     你必须向用户展示匹配到的所有任务列表，并强制询问确认。
     """
     with TASKS_LOCK:
-        if not os.path.exists(TASKS_FILE):
+        if not os.path.exists(task_store.TASKS_FILE):
             return "修改失败：任务列表为空。"
 
         try:

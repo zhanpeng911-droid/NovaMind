@@ -146,14 +146,10 @@ class TestScheduledTasks(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.tasks_file = Path(self.tmp.name) / "tasks.json"
-        # builtins 与 task_store 各自持有 TASKS_FILE 绑定，两处都要指向临时文件
-        self._patches = [
-            patch.object(builtins, "TASKS_FILE", str(self.tasks_file)),
-            patch("novamind.core.task_store.TASKS_FILE", str(self.tasks_file)),
-        ]
-        for p_ in self._patches:
-            p_.start()
-            self.addCleanup(p_.stop)
+        # TASKS_FILE 已收敛为 task_store 单一来源，只 patch 一处
+        self._patch = patch("novamind.core.task_store.TASKS_FILE", str(self.tasks_file))
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
         self.future = (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
 
     def _seed(self, n=1):
@@ -228,3 +224,45 @@ class TestGetCurrentTime(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBackupMillisecondResolution(unittest.TestCase):
+    """P3-2 回归：备份文件名含毫秒，同秒内连续保存生成两个备份。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.memory = Path(self.tmp.name) / "memory"
+        self.backup = self.memory / "backups"
+        self.profile = self.memory / "user_profile.md"
+        patchers = [
+            patch.object(builtins, "MEMORY_DIR", str(self.memory)),
+            patch.object(builtins, "PROFILE_PATH", str(self.profile)),
+            patch.object(builtins, "PROFILE_BACKUP_DIR", str(self.backup)),
+        ]
+        for p_ in patchers:
+            p_.start()
+            self.addCleanup(p_.stop)
+
+    def test_same_second_two_saves_two_backups(self):
+        """冻结时钟在同一秒，两次保存仍产生两个独立备份（毫秒位不同）。"""
+        from datetime import datetime
+
+        class Advancing(datetime):
+            counter = 0
+
+            @classmethod
+            def now(cls):
+                cls.counter += 1
+                # 同一秒内两次调用微秒不同（真实时钟天然如此，这里显式模拟）
+                return datetime(2026, 8, 26, 12, 0, 0, cls.counter * 1000)
+
+        with patch.object(builtins, "datetime", Advancing):
+            save_user_profile.invoke({"new_content": "# v1"})  # 首次保存无备份
+            save_user_profile.invoke({"new_content": "# v2"})  # 产生第 1 个备份
+            save_user_profile.invoke({"new_content": "# v3"})  # 产生第 2 个备份
+        backups = list(self.backup.glob("user_profile.*.md"))
+        self.assertEqual(len(backups), 2)
+        # 同秒内两次保存的备份文件名不同（毫秒位区分）
+        names = [b.name for b in backups]
+        self.assertEqual(len(set(names)), 2)
