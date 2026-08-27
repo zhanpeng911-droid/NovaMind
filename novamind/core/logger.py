@@ -166,6 +166,8 @@ class AuditLogger:
         必须在持有 _buffer_lock 的情况下调用。
         Returns: True 表示成功驱逐腾位，False 表示没有可驱逐项
         """
+        # maxlen 为构造时设定（deque(maxlen=N)），恒非 None
+        assert self._buffer.maxlen is not None
         if len(self._buffer) < self._buffer.maxlen:
             return True  # 还有空间，不需要驱逐
 
@@ -225,6 +227,7 @@ class AuditLogger:
         new_priority = self._event_priority(event)
 
         with self._not_empty:
+            assert self._buffer.maxlen is not None
             if len(self._buffer) >= self._buffer.maxlen:
                 # 队列满：尝试驱逐一条优先级更低的非关键事件
                 evicted = self._try_evict_for_new(new_priority)

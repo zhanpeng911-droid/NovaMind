@@ -54,9 +54,8 @@ jobs:
         run: uv run --no-sync ruff check novamind entry tests
 
   typecheck:
-    name: Mypy (advisory)
+    name: Mypy
     runs-on: ubuntu-latest
-    continue-on-error: true  # 渐进接入：首批文件零错误后再转强制并扩范围
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
