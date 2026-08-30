@@ -22,7 +22,6 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 
-_MCP_IO_POOL = ThreadPoolExecutor(max_workers=4)
 MCP_READ_TIMEOUT_SECONDS = 15
 
 
@@ -58,14 +57,18 @@ class MCPService:
         self._tools_cache: list[dict] | None = None
         self._request_id = 0  # 自增请求ID
         self._started = False  # 防止递归启动
+        self._io_pool: ThreadPoolExecutor | None = None  # 每服务独立读线程，超时互不拖累
 
     def _readline_with_timeout(self, timeout: int = MCP_READ_TIMEOUT_SECONDS) -> str:
         if self._process is None or self._process.stdout is None:
             return ""
-        future = _MCP_IO_POOL.submit(self._process.stdout.readline)
+        if self._io_pool is None:
+            self._io_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"mcp-{self.name}")
+        future = self._io_pool.submit(self._process.stdout.readline)
         try:
             return future.result(timeout=timeout)
         except FutureTimeout:
+            future.cancel()  # 尽力撤销；进程随 stop() 关闭管道后线程自然退出
             self.stop()
             return ""
 
@@ -87,9 +90,18 @@ class MCPService:
             self._process.stdin.write(json.dumps(request) + "\n")
             self._process.stdin.flush()
 
-            response_line = self._readline_with_timeout()
-            if response_line:
-                return json.loads(response_line)
+            # 读到匹配本请求 id 的响应为止；notification（无 id）与错位旧响应跳过
+            while True:
+                response_line = self._readline_with_timeout()
+                if not response_line:
+                    break
+                try:
+                    response = json.loads(response_line)
+                except json.JSONDecodeError:
+                    continue
+                if response.get("id") == self._request_id:
+                    return response
+                # id 不匹配（notification / 迟到的旧响应）→ 继续读下一行
         except Exception as e:
             return {"error": {"code": -1, "message": str(e)}}
 
@@ -139,14 +151,16 @@ class MCPService:
             return False
 
     def list_tools(self) -> list[dict]:
-        """获取服务暴露的所有工具"""
+        """获取服务暴露的所有工具。错误响应不缓存，下次调用可重试。"""
         if self._tools_cache is not None:
             return self._tools_cache
 
         response = self._send_request("tools/list")
-        tools = response.get("result", {}).get("tools", [])
-        self._tools_cache = tools
-        return tools
+        result = response.get("result")
+        if not isinstance(result, dict) or "tools" not in result:
+            return []  # 启动抖动/错误 → 不写缓存
+        self._tools_cache = result.get("tools", [])
+        return self._tools_cache
 
     def call_tool(self, name: str, arguments: dict) -> str:
         """调用指定工具"""

@@ -188,8 +188,8 @@ def test_b4_l5_memory_real_consolidation():
                 asyncio.run(agent.run(msg, thread_id=tid))
         agent.clear_conversation(tid)
 
-        store = provider._store
-        deadline = time.time() + 15
+        store = provider.store()
+        deadline = time.time() + 30  # 真实 API 偶发变慢，放宽轮询窗口
         episodic = []
         while time.time() < deadline:
             episodic = [t for t in store.list_by_type(MemoryType.EPISODIC)
@@ -329,7 +329,7 @@ def test_b10_real_recall_injection():
     try:
         provider = build_default_provider()
         # 预置一条语义记忆
-        provider._manager.encode("用户的小名叫豆豆", type=MemoryType.SEMANTIC, importance=0.9)
+        provider.manager().encode("用户的小名叫豆豆", type=MemoryType.SEMANTIC, importance=0.9)
         injected: list[bool] = []
         recall = MemoryRecallMiddleware(provider)
         orig = recall.abefore_model
@@ -391,9 +391,8 @@ def test_b13_user_profile_real():
     tmp = tempfile.TemporaryDirectory()
     prof = str(Path(tmp.name) / "mem" / "user_profile.md")
     with patch.object(builtins_mod, "MEMORY_DIR", str(Path(tmp.name) / "mem")), \
-            patch.object(builtins_mod, "PROFILE_PATH", prof), \
             patch.object(builtins_mod, "PROFILE_BACKUP_DIR", str(Path(tmp.name) / "mem" / "backups")), \
-            patch("novamind.core.context.PROFILE_PATH", prof):
+            patch("novamind.core.config.PROFILE_PATH", prof):
         builtins_mod.save_user_profile.invoke({"new_content": "# 用户画像\n- 名字：小豆\n- 最爱：喝咖啡\n"})
         agent = _real_agent(llm, tools=[], audit=FakeAuditLogger())
         tid = _tid("b13")

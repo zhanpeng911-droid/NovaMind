@@ -17,7 +17,8 @@ import operator
 import os
 import shutil
 import uuid
-from ..config import MEMORY_DIR, PROFILE_PATH, PROFILE_BACKUP_DIR
+from .. import config as _config
+from ..config import MEMORY_DIR, PROFILE_BACKUP_DIR
 from .. import task_store
 from ..task_store import TASKS_LOCK, load_tasks_unlocked, write_tasks_unlocked
 from .sandbox_tools import (
@@ -122,14 +123,14 @@ def get_system_model_info() -> str:
 
 def _backup_profile_if_exists() -> None:
     """如果当前画像文件存在，备份到 PROFILE_BACKUP_DIR 并清理超额备份。"""
-    if not os.path.exists(PROFILE_PATH):
+    if not os.path.exists(_config.PROFILE_PATH):
         return
 
     os.makedirs(PROFILE_BACKUP_DIR, exist_ok=True)
     # 含毫秒，消除同秒内连续保存合并为一个备份的问题
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     backup_path = os.path.join(PROFILE_BACKUP_DIR, f"user_profile.{timestamp}.md")
-    shutil.copy2(PROFILE_PATH, backup_path)
+    shutil.copy2(_config.PROFILE_PATH, backup_path)
 
     # 清理超额备份：按文件名时间戳排序，保留最近 MAX_PROFILE_BACKUPS 份
     backups = sorted(
@@ -159,10 +160,10 @@ def save_user_profile(new_content: str) -> str:
     _backup_profile_if_exists()
 
     # 原子写入：先写临时文件，再 os.replace 覆盖目标文件
-    tmp_path = PROFILE_PATH + ".tmp"
+    tmp_path = _config.PROFILE_PATH + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         f.write(new_content)
-    os.replace(tmp_path, PROFILE_PATH)
+    os.replace(tmp_path, _config.PROFILE_PATH)
 
     # 桥接五层记忆：画像同时写入 procedural 记忆（若记忆 provider 已启用，否则静默降级）
     try:

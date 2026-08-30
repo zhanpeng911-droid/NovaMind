@@ -21,7 +21,7 @@ def build_default_middlewares(llm: Any) -> list:
     """按运行配置装配默认中间件栈（记忆 + 治理）。llm 用于 L5 worker 抽取。"""
     cfg = get_memory_config()
     provider = build_default_provider()
-    worker = start_memory_worker(provider._manager, llm)
+    worker = start_memory_worker(provider.manager(), llm)
 
     middlewares: list = [
         MemoryRecallMiddleware(

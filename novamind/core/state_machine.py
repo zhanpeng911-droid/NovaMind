@@ -14,6 +14,7 @@ import json
 import os
 import threading
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Awaitable
 from langchain_core.messages import (
@@ -341,6 +342,7 @@ class NovaMindAgent:
         context_manager: ContextManager | None = None,
         conversation_store: ConversationStore | None = None,
         middleware_manager: MiddlewareManager | None = None,
+        max_cached_states: int = 256,
     ):
         self._nodes: dict[str, Node] = {}
         self._edges: list[Edge] = []
@@ -351,9 +353,11 @@ class NovaMindAgent:
         self._middleware_manager = middleware_manager or MiddlewareManager()
 
         # 状态在Agent级别维护：跨run/astream调用保持对话连贯
-        self._states: dict[str, AgentState] = {}
+        # OrderedDict 支持 LRU 淘汰：长驻 webui/GUI 进程防状态字典随会话数无限增长
+        self._states: OrderedDict[str, AgentState] = OrderedDict()
         # 持久化计数器：记录每个线程已保存的消息数量，避免全量加载
         self._persisted_counts: dict[str, int] = {}
+        self._max_cached_states = max(1, int(max_cached_states))
 
     @property
     def middleware_manager(self) -> MiddlewareManager:
@@ -382,6 +386,7 @@ class NovaMindAgent:
         如果不存在，从数据库加载或创建新状态。
         """
         if thread_id in self._states:
+            self._states.move_to_end(thread_id)  # LRU：命中即视为最近使用
             return self._states[thread_id]
 
         state = AgentState()
@@ -397,7 +402,16 @@ class NovaMindAgent:
                 state.summary = self._store.load_summary(thread_id)
 
         self._states[thread_id] = state
+        self._evict_states_if_needed()
         return state
+
+    def _evict_states_if_needed(self) -> None:
+        """LRU 淘汰：状态在每次 run/astream 结束时都已落盘，
+        被淘汰的会话下次访问自动从 SQLite 恢复，数据不丢。"""
+        while len(self._states) > self._max_cached_states:
+            oldest_tid, _ = next(iter(self._states.items()))
+            self._states.pop(oldest_tid)
+            self._persisted_counts.pop(oldest_tid, None)
 
     def _persist_state(self, thread_id: str, state: AgentState) -> None:
         """将本轮新增消息持久化到数据库（O(1)追加，不全量加载）"""

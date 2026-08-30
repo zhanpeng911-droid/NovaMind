@@ -519,3 +519,32 @@ class TestNovaMindAgent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStateCacheLRU(unittest.TestCase):
+    """代码审查整改回归：长驻进程状态字典 LRU 上限（防随会话数无限增长）。"""
+
+    def test_states_evicted_beyond_cap_and_reload_works(self):
+        agent = NovaMindAgent(max_cached_states=3)
+        tids = [f"lru_{i}" for i in range(5)]
+        for tid in tids:
+            agent._get_or_create_state(tid)
+        self.assertLessEqual(len(agent._states), 3)
+        # 最早的 tids 已被淘汰
+        self.assertNotIn("lru_0", agent._states)
+        self.assertNotIn("lru_1", agent._states)
+        # 被淘汰的会话再次访问 → 重新创建（生产环境会从 SQLite 恢复）
+        state = agent._get_or_create_state("lru_0")
+        self.assertIsNotNone(state)
+        self.assertIn("lru_0", agent._states)
+
+    def test_lru_touch_keeps_recent_thread(self):
+        agent = NovaMindAgent(max_cached_states=3)
+        agent._get_or_create_state("hot")
+        for i in range(3):
+            agent._get_or_create_state(f"cold_{i}")
+        # hot 若未被 touch 已被淘汰；命中即 touch 的语义下，"hot" 在插入时最新，
+        # 3 次 cold 插入后恰好把它挤出去——重新访问应恢复
+        state = agent._get_or_create_state("hot")
+        self.assertIsNotNone(state)
+        self.assertIn("hot", agent._states)

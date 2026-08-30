@@ -22,7 +22,8 @@ from typing import Any
 from langchain_core.messages import (
     BaseMessage, SystemMessage, HumanMessage
 )
-from .config import DOCS_DIR, PROFILE_PATH
+from . import config as _config
+from .config import DOCS_DIR
 
 
 @dataclass(frozen=True)
@@ -417,7 +418,7 @@ class ContextManager:
 
     def load_user_profile(self) -> str:
         """读取用户长期画像文件"""
-        profile_path = PROFILE_PATH
+        profile_path = _config.PROFILE_PATH
         if os.path.exists(profile_path):
             with open(profile_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read().strip()

@@ -95,7 +95,7 @@ class TestSaveUserProfile(unittest.TestCase):
         self.profile = self.memory / "user_profile.md"
         patchers = [
             patch.object(builtins, "MEMORY_DIR", str(self.memory)),
-            patch.object(builtins, "PROFILE_PATH", str(self.profile)),
+            patch("novamind.core.config.PROFILE_PATH", str(self.profile)),
             patch.object(builtins, "PROFILE_BACKUP_DIR", str(self.backup)),
         ]
         for p in patchers:
@@ -237,7 +237,7 @@ class TestBackupMillisecondResolution(unittest.TestCase):
         self.profile = self.memory / "user_profile.md"
         patchers = [
             patch.object(builtins, "MEMORY_DIR", str(self.memory)),
-            patch.object(builtins, "PROFILE_PATH", str(self.profile)),
+            patch("novamind.core.config.PROFILE_PATH", str(self.profile)),
             patch.object(builtins, "PROFILE_BACKUP_DIR", str(self.backup)),
         ]
         for p_ in patchers:

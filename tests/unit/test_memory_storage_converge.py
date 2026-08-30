@@ -83,7 +83,7 @@ class TestBuildProviderStoragePlacement(unittest.TestCase):
                 provider = build_default_provider()
             self.assertTrue((ws / "memory_traces" / "traces.md").exists())
             self.assertFalse((elsewhere / "memory_traces").exists())
-            self.assertIsNotNone(provider._store)
+            self.assertIsNotNone(provider.store())
         finally:
             set_memory_config(old)
 
@@ -109,7 +109,7 @@ class TestRecallIndexWiring(unittest.TestCase):
         _sm(MemoryConfig(storage_path=str(Path(tmp.name) / "mem")))
         try:
             provider = build_default_provider()
-            provider._manager.encode("用户的小名叫豆豆", type=MemoryType.SEMANTIC, importance=0.9)
+            provider.manager().encode("用户的小名叫豆豆", type=MemoryType.SEMANTIC, importance=0.9)
             hits = provider.retriever().retrieve(MemoryQuery(text="我的小名叫什么"))
             self.assertGreaterEqual(len(hits), 1, "encode 后未进入检索索引（缺陷#1 复发）")
         finally:
