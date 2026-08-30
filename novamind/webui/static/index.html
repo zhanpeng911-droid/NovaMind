@@ -75,36 +75,22 @@
     --on-teal: #ffffff;
   }
 
-  /* ── 吸尘器主题切换动画：整页被按钮吸走，再以新主题旋出 ─────────── */
-  body { transform-origin: var(--vac-x, 50%) var(--vac-y, 50%); }
-  body.vac-out {
-    animation: vac-out .42s cubic-bezier(.6, 0, .85, .4) forwards;
+  /* ── 主题切换：翻页式覆盖（新主题色从左侧斜向滑入，慢慢盖住旧界面）── */
+  :root { --wipe-bg: var(--bg); }
+  :root.wipe-light { --wipe-bg: #eef1f6; }
+  :root.wipe-dark  { --wipe-bg: #0b0e14; }
+  #theme-wipe {
+    position: fixed; inset: -12% -18%; z-index: 9992;
+    background: var(--wipe-bg);
+    border-right: 2px solid var(--teal);   /* 页缘的品牌色细边 */
+    transform: translateX(-130%) skewX(-8deg);
     pointer-events: none;
   }
-  body.vac-in { animation: vac-in .55s cubic-bezier(.16, .8, .3, 1.04); }
-  @keyframes vac-out {
-    0%   { transform: scale(1) rotate(0deg); opacity: 1; filter: blur(0); }
-    55%  { filter: blur(1.2px); opacity: .85; }
-    100% { transform: scale(.002) rotate(560deg); opacity: 0; filter: blur(4px); }
-  }
-  @keyframes vac-in {
-    0%   { transform: scale(.002) rotate(-560deg); opacity: 0; filter: blur(4px); }
-    55%  { filter: blur(1.2px); opacity: .9; }
-    100% { transform: scale(1) rotate(0deg); opacity: 1; filter: blur(0); }
-  }
-  .gust {
-    position: fixed; z-index: 9995; width: 14px; height: 14px;
-    margin: -7px 0 0 -7px; border: 2px solid var(--teal);
-    border-radius: 50%; pointer-events: none;
-    animation: gust .42s cubic-bezier(.6, 0, .85, .4) forwards;
-  }
-  @keyframes gust {
-    from { transform: scale(16); opacity: .85; }
-    to   { transform: scale(.1); opacity: .1; }
-  }
+  #theme-wipe.wiping { transition: transform .78s cubic-bezier(.45, 0, .2, 1); }
+  #theme-wipe.covered { transform: translateX(6%) skewX(-8deg); }
+  #theme-wipe.fading { transition: opacity .32s ease; opacity: 0; }
   @media (prefers-reduced-motion: reduce) {
-    body.vac-out, body.vac-in { animation: none; }
-    .gust { display: none; }
+    #theme-wipe.wiping { transition: none; }
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -458,6 +444,7 @@
 </style>
 </head>
 <body>
+  <div id="theme-wipe"></div>
   <header>
     <span class="brand"><span class="nm">NOVA</span>_MIND<span class="cursor">▍</span></span>
     <span class="tag">AUDITABLE AGENT</span>
@@ -499,8 +486,9 @@
   const statusEl = document.getElementById('status');
   const statusText = document.getElementById('status-text');
 
-  // ── 白天/黑夜模式切换（吸尘器动画：整页被按钮吸走，新主题旋回）──
+  // ── 白天/黑夜模式切换（翻页式覆盖：新主题色从左侧斜向滑入，慢慢盖住旧界面）──
   const themeBtn = document.getElementById('theme-toggle');
+  const wipeEl = document.getElementById('theme-wipe');
   let themeSwitching = false;
 
   function applyThemeIcon() {
@@ -513,37 +501,40 @@
   themeBtn.addEventListener('click', () => {
     if (themeSwitching) return;
     themeSwitching = true;
+    const html = document.documentElement;
+    const next = html.dataset.theme === 'light' ? 'dark' : 'light';
 
-    // 吸尘器吸口 = 按钮中心：transform-origin 设到按钮位置
-    const rect = themeBtn.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    document.body.style.setProperty('--vac-x', cx + 'px');
-    document.body.style.setProperty('--vac-y', cy + 'px');
-
-    // 按钮处的一圈"气流"收缩，强化吸入感
-    const gust = document.createElement('span');
-    gust.className = 'gust';
-    gust.style.left = cx + 'px';
-    gust.style.top = cy + 'px';
-    document.body.appendChild(gust);
-
-    document.body.classList.add('vac-out');
-    setTimeout(() => {
-      // 页面已被"吸走"（不可见）→ 此刻切换主题并持久化
-      const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
-      document.documentElement.dataset.theme = next;
+    const finish = () => {
+      html.dataset.theme = next;
       try { localStorage.setItem('novamind-theme', next); } catch (e) {}
       applyThemeIcon();
+    };
 
-      document.body.classList.remove('vac-out');
-      document.body.classList.add('vac-in');
+    // 无动画偏好：直接切，不播放覆盖
+    if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      finish();
+      themeSwitching = false;
+      return;
+    }
+
+    // 覆盖层染上" incoming 主题"的底色（CSS 变量按 next 选择，不改动页面主题）
+    html.classList.add(next === 'light' ? 'wipe-light' : 'wipe-dark');
+    wipeEl.classList.add('wiping');
+    // 双 rAF 确保初始 transform 先渲染，过渡才会生效
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      wipeEl.classList.add('covered');
+    }));
+
+    // 覆盖完成（页面全被新底色盖住）→ 底层切主题 → 覆盖层淡出露出真实界面
+    setTimeout(() => {
+      finish();
+      wipeEl.classList.add('fading');
       setTimeout(() => {
-        document.body.classList.remove('vac-in');
-        gust.remove();
+        wipeEl.classList.remove('wiping', 'covered', 'fading');
+        html.classList.remove('wipe-light', 'wipe-dark');
         themeSwitching = false;
-      }, 560);
-    }, 430);
+      }, 340);
+    }, 810);
   });
 
 
