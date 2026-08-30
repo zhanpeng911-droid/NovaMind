@@ -4,6 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>NovaMind</title>
+<script>
+  /* 主题初始化必须先于首帧渲染，避免闪屏 */
+  (function () {
+    var t = null;
+    try { t = localStorage.getItem("novamind-theme"); } catch (e) {}
+    if (!t) t = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
 <style>
   /* ============================================================
      NovaMind 工作台 —— 工业实用 + 终端控制台美学
@@ -28,8 +37,74 @@
     --dim: #66707f;
     --faint: #3a4356;
 
+    --scan-line: rgba(255, 255, 255, 0.018);
+    --tint-teal: rgba(79, 209, 197, 0.1);
+    --tint-amber: rgba(230, 180, 80, 0.08);
+    --tint-red: rgba(224, 108, 117, 0.08);
+    --tint-info: rgba(106, 166, 224, 0.08);
+    --on-teal: #06110f;
+
     --mono: "Cascadia Code", "JetBrains Mono", Consolas, "Courier New", monospace;
     --sans: "Segoe UI", "Microsoft YaHei", -apple-system, sans-serif;
+  }
+
+  /* ── 白天模式（点击 header 的 ☀/☾ 按钮切换，带吸尘器动画）────────── */
+  :root[data-theme="light"] {
+    --bg: #eef1f6;
+    --surface: #ffffff;
+    --surface-2: #f7f9fc;
+    --border: #d7dde7;
+    --border-strong: #b9c3d3;
+
+    --blue: #3a6ea5;
+    --green: #557a2e;
+    --teal: #0d9488;
+    --amber: #a8730f;
+    --red: #c0392b;
+    --info: #2b6cb0;
+
+    --text: #1b2432;
+    --dim: #647084;
+    --faint: #c9d1de;
+
+    --scan-line: rgba(20, 30, 50, 0.022);
+    --tint-teal: rgba(13, 148, 136, 0.1);
+    --tint-amber: rgba(168, 115, 15, 0.1);
+    --tint-red: rgba(192, 57, 43, 0.08);
+    --tint-info: rgba(43, 108, 176, 0.08);
+    --on-teal: #ffffff;
+  }
+
+  /* ── 吸尘器主题切换动画：整页被按钮吸走，再以新主题旋出 ─────────── */
+  body { transform-origin: var(--vac-x, 50%) var(--vac-y, 50%); }
+  body.vac-out {
+    animation: vac-out .42s cubic-bezier(.6, 0, .85, .4) forwards;
+    pointer-events: none;
+  }
+  body.vac-in { animation: vac-in .55s cubic-bezier(.16, .8, .3, 1.04); }
+  @keyframes vac-out {
+    0%   { transform: scale(1) rotate(0deg); opacity: 1; filter: blur(0); }
+    55%  { filter: blur(1.2px); opacity: .85; }
+    100% { transform: scale(.002) rotate(560deg); opacity: 0; filter: blur(4px); }
+  }
+  @keyframes vac-in {
+    0%   { transform: scale(.002) rotate(-560deg); opacity: 0; filter: blur(4px); }
+    55%  { filter: blur(1.2px); opacity: .9; }
+    100% { transform: scale(1) rotate(0deg); opacity: 1; filter: blur(0); }
+  }
+  .gust {
+    position: fixed; z-index: 9995; width: 14px; height: 14px;
+    margin: -7px 0 0 -7px; border: 2px solid var(--teal);
+    border-radius: 50%; pointer-events: none;
+    animation: gust .42s cubic-bezier(.6, 0, .85, .4) forwards;
+  }
+  @keyframes gust {
+    from { transform: scale(16); opacity: .85; }
+    to   { transform: scale(.1); opacity: .1; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body.vac-out, body.vac-in { animation: none; }
+    .gust { display: none; }
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -59,8 +134,8 @@
     z-index: 9990;
     background: repeating-linear-gradient(
       0deg,
-      rgba(255, 255, 255, 0.018) 0px,
-      rgba(255, 255, 255, 0.018) 1px,
+      var(--scan-line) 0px,
+      var(--scan-line) 1px,
       transparent 1px,
       transparent 3px
     );
@@ -115,6 +190,15 @@
 
   /* 呼吸活体状态灯（记忆点之一） */
   header .status { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 12px; color: var(--dim); }
+  .theme-toggle {
+    width: 30px; height: 30px; margin-right: 12px;
+    background: var(--surface-2); color: var(--amber);
+    border: 1px solid var(--border); border-radius: 6px;
+    font-size: 15px; line-height: 1; cursor: pointer;
+    transition: border-color .15s, color .15s, transform .15s;
+  }
+  .theme-toggle:hover { border-color: var(--teal); color: var(--teal); transform: rotate(18deg); }
+
   header .status .dot {
     width: 8px; height: 8px; border-radius: 50%;
     background: var(--faint);
@@ -147,7 +231,7 @@
     cursor: pointer; text-align: center;
     transition: background 0.15s, color 0.15s;
   }
-  aside .new-chat:hover { background: rgba(79, 209, 197, 0.1); }
+  aside .new-chat:hover { background: var(--tint-teal); }
 
   aside .section-label {
     font-family: var(--mono); font-size: 10px;
@@ -272,9 +356,9 @@
   /* 诊断 */
   .doctor-summary { display: flex; gap: 8px; align-items: center; margin-bottom: 18px; flex-wrap: wrap; font-family: var(--mono); }
   .badge { padding: 3px 10px; border: 1px solid; font-size: 12px; letter-spacing: 0.5px; }
-  .badge.error { color: var(--red); border-color: var(--red); background: rgba(224,108,117,0.08); }
-  .badge.warn  { color: var(--amber); border-color: var(--amber); background: rgba(230,180,80,0.08); }
-  .badge.info  { color: var(--info); border-color: var(--info); background: rgba(106,166,224,0.08); }
+  .badge.error { color: var(--red); border-color: var(--red); background: var(--tint-red); }
+  .badge.warn  { color: var(--amber); border-color: var(--amber); background: var(--tint-amber); }
+  .badge.info  { color: var(--info); border-color: var(--info); background: var(--tint-info); }
   .ok-mark { color: var(--teal); font-weight: 600; }
   .err-mark { color: var(--red); font-weight: 600; }
 
@@ -362,7 +446,7 @@
   }
   #input:focus { border-color: var(--teal); }
   #send {
-    background: var(--teal); color: #06110f;
+    background: var(--teal); color: var(--on-teal);
     border: none; padding: 0 22px; height: 40px;
     font-family: var(--mono); font-size: 13px; font-weight: 600; letter-spacing: 1px;
     cursor: pointer;
@@ -378,6 +462,7 @@
     <span class="brand"><span class="nm">NOVA</span>_MIND<span class="cursor">▍</span></span>
     <span class="tag">AUDITABLE AGENT</span>
     <span class="spacer"></span>
+    <button id="theme-toggle" class="theme-toggle" title="切换白天 / 黑夜模式">☾</button>
     <span class="status idle" id="status"><span class="dot"></span><span id="status-text">STANDBY</span></span>
   </header>
 
@@ -413,6 +498,54 @@
   const sendBtn = document.getElementById('send');
   const statusEl = document.getElementById('status');
   const statusText = document.getElementById('status-text');
+
+  // ── 白天/黑夜模式切换（吸尘器动画：整页被按钮吸走，新主题旋回）──
+  const themeBtn = document.getElementById('theme-toggle');
+  let themeSwitching = false;
+
+  function applyThemeIcon() {
+    const light = document.documentElement.dataset.theme === 'light';
+    themeBtn.textContent = light ? '☀' : '☾';
+    themeBtn.title = light ? '切换黑夜模式' : '切换白天模式';
+  }
+  applyThemeIcon();
+
+  themeBtn.addEventListener('click', () => {
+    if (themeSwitching) return;
+    themeSwitching = true;
+
+    // 吸尘器吸口 = 按钮中心：transform-origin 设到按钮位置
+    const rect = themeBtn.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    document.body.style.setProperty('--vac-x', cx + 'px');
+    document.body.style.setProperty('--vac-y', cy + 'px');
+
+    // 按钮处的一圈"气流"收缩，强化吸入感
+    const gust = document.createElement('span');
+    gust.className = 'gust';
+    gust.style.left = cx + 'px';
+    gust.style.top = cy + 'px';
+    document.body.appendChild(gust);
+
+    document.body.classList.add('vac-out');
+    setTimeout(() => {
+      // 页面已被"吸走"（不可见）→ 此刻切换主题并持久化
+      const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+      document.documentElement.dataset.theme = next;
+      try { localStorage.setItem('novamind-theme', next); } catch (e) {}
+      applyThemeIcon();
+
+      document.body.classList.remove('vac-out');
+      document.body.classList.add('vac-in');
+      setTimeout(() => {
+        document.body.classList.remove('vac-in');
+        gust.remove();
+        themeSwitching = false;
+      }, 560);
+    }, 430);
+  });
+
 
   let sessions = [];
   let currentId = null;
