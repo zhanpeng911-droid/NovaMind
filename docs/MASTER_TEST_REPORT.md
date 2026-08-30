@@ -161,6 +161,32 @@ uv run --no-sync mypy novamind/core/policy.py novamind/core/token_tracker.py \
 
 ---
 
+## 九、代码审查与整改（五轴全项目审查，2026-08-26）
+
+> 方法：code-review-and-quality 五轴（正确性 / 可读性 / 架构 / 安全 / 性能）对 `novamind/` + `entry/` 全部 13931 行产品代码审查；每项整改先做爆炸半径分析，改完即跑对应测试，最后全量验证。
+
+### 整改清单（4 项 Required，全部完成）
+
+| # | 轴 | 问题 | 修复 | 回归 |
+|---|---|---|---|---|
+| 1 | 正确性 | MCP 响应不按请求 id 关联（notification/错位响应会错位消费）；`list_tools` 把错误响应当空结果**永久缓存**；全局 4 线程 IO 池可被超时任务占满 | 响应按 `id` 匹配、跳过 notification；错误响应不写缓存可重试；改**每服务独立单线程池** | 新增 `tests/unit/test_mcp_adapter.py` **7 项**（id 匹配 / notification 跳过 / 非 JSON 行 / 错误不缓存 / 成功缓存 / 文本拼接 / 错误回传） |
+| 2 | 性能/正确性 | `NovaMindAgent._states`/`_persisted_counts` 按会话只增不减，长驻 webui/GUI 进程慢性内存泄漏 | `_states` 改 `OrderedDict`，命中即 touch，超 `max_cached_states`（默认 256）淘汰最旧 | 淘汰安全性论证：状态每次 run 结束已落盘，再访问自动从 SQLite 恢复；新增 2 项回归（超限淘汰+恢复 / touch 语义） |
+| 3 | 架构 | PROFILE_PATH "双绑定"（builtins 保存端、context 读取端各自 from-import）导致测试需 patch 两处、改路径不联动 | 两端统一运行时引用 `config.PROFILE_PATH`，测试单点 patch 即全生效 | 既有 builtins 单测 + 真实 LLM B13 均验证单 patch 生效 |
+| 4 | 架构 | `default_stack` 触碰 `provider._manager` 私有成员 | 补公开访问路径，default_stack 改用 `provider.manager()` | ruff/mypy 全清 |
+
+### 明确不修（经确认）
+
+- 死代码保留：`MCPToolInput`（mcp_adapter）、`get_memory_worker`（bootstrap）——用户决定保留，不删除。
+- `SecretStr` 包裹 api_key、AuditLogger 长持句柄、BM25 全量扫描：Nit/FYI 级，留观。
+
+### 审查结论与验证
+
+- **Verdict: Approve**——五轴无 Critical；安全面（SQL 参数化/零信任工具面/审计脱敏/密钥不入库）全绿。
+- 整改后验证：常规 **572 passed**（含新增 9 项回归）；Part B 真实 LLM **19/19**；ruff 全清；mypy 13 文件零错误；GUI 功能（白天/黑夜 + 翻页切换）随整改重打包 `dist/nova-mind-gui.exe` 并启动验证（health OK）。
+- 遗留：MCP 适配器更深的行为测试（真实 server 往返）待 `mcp` 依赖就绪后补。
+
+---
+
 ## 九、附录索引（粒度细节在各子文档）
 
 | 文档 | 内容 |
