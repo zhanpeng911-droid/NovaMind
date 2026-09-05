@@ -163,12 +163,14 @@ def _incremental_read(
         if tail_incomplete:
             # EOF 无换行尾行：不解析，保留其起点（追加后再解析）
             return ReadResult(events, line_start, has_more=False,
-                              discarding=False)
+                              discarding=discarding)
         if budget_exhausted:
             return ReadResult(events, line_start, has_more=True,
                               discarding=discarding)
+        # EOF 只表示暂时没有更多字节，不代表当前行结束：正处丢弃模式时
+        # 必须保留 discarding（换行才清除）。正常路径 discarding 恒为 False。
         return ReadResult(events, pos, has_more=pos < file_size,
-                          discarding=False)
+                          discarding=discarding)
 
 
 def _tail_read(path: str, file_size: int, limit: int) -> ReadResult:

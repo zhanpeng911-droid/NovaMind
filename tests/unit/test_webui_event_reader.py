@@ -291,5 +291,83 @@ class TestReaderReviewFixes(unittest.TestCase):
         os.unlink(path)
 
 
+class TestEofPreservesDiscardState(unittest.TestCase):
+    """复核缺陷（2026-09-05）：EOF 只表示暂时无更多字节，不代表当前行结束。
+
+    - 丢弃超长行时 EOF/空轮询不清除 discarding（换行才清除）；
+    - 续写超长行内的合法 JSON 片段不产生伪事件、不丢失下一条正常事件；
+    - 状态经 v2 cursor 编解码后传回，验证完整续读链路。"""
+
+    def _roundtrip(self, result):
+        """把结果状态过一遍 v2 cursor 编解码再传回读取器。"""
+        from novamind.webui.api_models import (
+            decode_monitor_events_cursor,
+            encode_monitor_events_cursor,
+        )
+
+        raw = encode_monitor_events_cursor(result.next_offset, result.discarding)
+        return decode_monitor_events_cursor(raw)
+
+    def test_eof_preserves_discard_and_idle_poll_stable(self):
+        """写入 >MAX_LINE 且 <SCAN_BUDGET 的无换行内容：读到 EOF 后
+        discarding=True；空轮询一次偏移与状态不变。"""
+        path = _mk_file()
+        with open(path, "wb") as f:
+            f.write(b"z" * (MAX_LINE + 1000))  # 无换行，< 预算
+        r1 = read_events(path, limit=10, offset=0)
+        self.assertEqual(r1.events, [])
+        self.assertTrue(r1.discarding, "EOF 必须保留丢弃状态")
+
+        offset, discarding = self._roundtrip(r1)
+        self.assertEqual((offset, discarding),
+                         (r1.next_offset, r1.discarding))
+
+        # 空轮询：偏移和状态不变（允许后续追加继续丢弃）
+        r2 = read_events(path, limit=10, offset=offset, discarding=discarding)
+        self.assertEqual(r2.events, [])
+        self.assertTrue(r2.discarding)
+        self.assertEqual(r2.next_offset, offset)
+        os.unlink(path)
+
+    def test_append_within_long_line_no_phantom_event(self):
+        """超长行（无换行）→ 续写合法 JSON 片段（不换行）→ \n + 正常事件。
+
+        超长行内的 JSON 片段必须始终被丢弃（它是同一行的一部分），
+        仅返回 \n 后的正常事件；随后游标到 EOF、discarding=False，
+        再次读取无重复。"""
+        path = _mk_file()
+        with open(path, "wb") as f:
+            f.write(b"z" * (MAX_LINE + 100))  # 超长行开头（无换行）
+        r1 = read_events(path, limit=10, offset=0)
+        self.assertTrue(r1.discarding)
+        offset, discarding = self._roundtrip(r1)
+
+        # 追加一段合法 JSON 文本（仍不换行）——超长行的延续
+        phantom = json.dumps({"event": "phantom", "n": 0}).encode()
+        with open(path, "ab") as f:
+            f.write(phantom)
+        r2 = read_events(path, limit=10, offset=offset, discarding=discarding)
+        self.assertEqual(r2.events, [],
+                         "超长行内的 JSON 片段不得产生伪事件")
+        self.assertTrue(r2.discarding, "仍处丢弃中，尚未遇到换行")
+
+        # 再追加 \n + 一条正常事件：整条超长行被丢弃，仅返回正常事件
+        with open(path, "ab") as f:
+            f.write(b"\n")
+            f.write(json.dumps({"event": "real", "n": 1}).encode() + b"\n")
+        r3 = read_events(path, limit=10, offset=offset, discarding=discarding)
+        self.assertEqual([e["event"] for e in r3.events], ["real"])
+        # 换行已清除丢弃状态；游标到 EOF
+        self.assertFalse(r3.discarding)
+        self.assertFalse(r3.has_more)
+
+        # 再次读取无重复
+        r4 = read_events(path, limit=10, offset=r3.next_offset,
+                         discarding=r3.discarding)
+        self.assertEqual(r4.events, [])
+        self.assertEqual(r4.next_offset, r3.next_offset)
+        os.unlink(path)
+
+
 if __name__ == "__main__":
     unittest.main()
