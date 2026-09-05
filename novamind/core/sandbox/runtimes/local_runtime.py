@@ -188,6 +188,27 @@ class LocalRuntime:
         except PermissionError as exc:
             raise SandboxPermissionError(f"permission denied: {path}", path=path, operation="grep") from exc
 
+    def make_dir(self, path: str) -> None:
+        try:
+            os.makedirs(path, exist_ok=True)
+        except PermissionError as exc:
+            raise SandboxPermissionError(f"permission denied: {path}", path=path, operation="make_dir") from exc
+
+    def list_dir_typed(self, path: str, max_entries: int = 1000) -> list[tuple[str, bool]]:
+        root = Path(path)
+        if not root.exists():
+            raise SandboxFileNotFoundError(f"dir not found: {path}", path=path, operation="list_dir")
+        try:
+            out: list[tuple[str, bool]] = []
+            with os.scandir(root) as it:
+                for entry in sorted(it, key=lambda e: e.name):
+                    if len(out) >= max_entries:
+                        break
+                    out.append((entry.name, entry.is_dir()))
+            return out
+        except PermissionError as exc:
+            raise SandboxPermissionError(f"permission denied: {path}", path=path, operation="list_dir") from exc
+
     def download_file(self, path: str) -> bytes:
         try:
             return Path(path).read_bytes()

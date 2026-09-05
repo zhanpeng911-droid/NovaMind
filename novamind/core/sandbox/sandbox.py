@@ -126,5 +126,16 @@ class Sandbox:
         physical = self._translator.translate_path(path)
         self._runtime.update_file(physical, content)
 
+    def make_dir(self, path: str) -> None:
+        self._guard.validate_path(path, write=True)
+        physical = self._translator.translate_path(path)
+        self._runtime.make_dir(physical)
+
+    def list_dir_typed(self, path: str, max_entries: int = 1000) -> list[tuple[str, bool]]:
+        self._guard.validate_path(path, write=False)
+        physical = self._translator.translate_path(path)
+        entries = self._runtime.list_dir_typed(physical, max_entries=max_entries)
+        return [(self._translator.mask_output(n), is_dir) for n, is_dir in entries]
+
     def close(self) -> None:
         self._runtime.close()

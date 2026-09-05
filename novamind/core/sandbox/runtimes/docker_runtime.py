@@ -120,5 +120,19 @@ class DockerRuntime:
     def update_file(self, path: str, content: bytes) -> None:
         self.write_file(path, content.decode("utf-8", errors="replace"), append=False)
 
+    def make_dir(self, path: str) -> None:
+        self.exec_command(f"mkdir -p {shlex.quote(path)}")
+
+    def list_dir_typed(self, path: str, max_entries: int = 1000) -> list[tuple[str, bool]]:
+        output = self.exec_command(
+            f"find {shlex.quote(path)} -maxdepth 1 -mindepth 1 "
+            f"-printf '%y/%P\\n' 2>/dev/null | head -n {max_entries}"
+        )
+        entries: list[tuple[str, bool]] = []
+        for line in output.splitlines():
+            if len(line) > 2 and line[1] == "/":
+                entries.append((line[2:], line[0] == "d"))
+        return sorted(entries)
+
     def close(self) -> None:
         pass

@@ -215,3 +215,164 @@ def execute_office_shell(command: str) -> str:
         return "❌ 未处理的受控命令。"
     except Exception as e:
         return f"❌ 执行异常：{str(e)}"
+
+
+# ==================== Phase 1：provider-backed 工具工厂 ====================
+# 四个工具保留与 legacy 相同的名称、参数 schema 与主要行为，但实现改为
+# 从当前 Sandbox 上下文取 Sandbox 并调用其公开 API（SandboxMiddleware 负责设置上下文）。
+# legacy 模块级工具保留，供直接调用与 plugin_loader 兼容；Agent 默认装配切到工厂工具见 Phase 2。
+
+VIRTUAL_ROOT = "/mnt/novamind/user_data"
+
+# legacy 工具在 tools/__init__ 暴露，这里复用其参数 schema，保证契约一致
+
+
+def _norm_virtual_path(relative_path: str) -> str:
+    """把相对路径标准化为挂载区虚拟路径：反斜杠归一、拒绝绝对根与 .. 穿越。
+
+    返回 'VIRTUAL_ROOT/<normalized>'。Guard 会做二次校验。
+    """
+    raw = relative_path or ""
+    # 绝对根判断在归一化之前（/abs/x、\abs\x 都拒绝）
+    if raw.startswith("/") or raw.startswith("\\"):
+        raise PermissionError("absolute root rejected")
+    cleaned = raw.replace("\\", "/").strip("/")
+    if not cleaned:
+        return VIRTUAL_ROOT
+    parts = [p for p in cleaned.split("/") if p not in ("", ".")]
+    if any(p == ".." for p in parts):
+        raise PermissionError("path traversal rejected")
+    first = parts[0]
+    if first.endswith(":"):
+        raise PermissionError("absolute root rejected")
+    return f"{VIRTUAL_ROOT}/{'/'.join(parts)}"
+
+
+def _sandbox_list(sub_dir: str = "") -> str:
+    from ..sandbox.context import require_current_sandbox
+
+    sb = require_current_sandbox()
+    virtual = _norm_virtual_path(sub_dir)
+    try:
+        entries = sb.list_dir_typed(virtual, max_entries=1000)
+    except Exception as e:
+        return f"目录不存在：{sub_dir}" if "not found" in str(e).lower() else f"操作失败：{e}"
+    if not entries:
+        return f"[{sub_dir if sub_dir else 'office 根目录'}] 是空的。"
+    lines = [f"{'📁' if is_dir else '📄'} {name}" for name, is_dir in entries]
+    return "\n".join(lines)
+
+
+def _sandbox_read(filepath: str) -> str:
+    from ..sandbox.context import require_current_sandbox
+
+    sb = require_current_sandbox()
+    virtual = _norm_virtual_path(filepath)
+    try:
+        content = sb.read_file(virtual)
+    except Exception as e:
+        return f"文件不存在：{filepath}" if "not found" in str(e).lower() else f"操作失败：{e}"
+    if len(content) > 10000:
+        return content[:10000] + "\n\n...[内容过长，已被安全截断]..."
+    return content
+
+
+def _sandbox_write(filepath: str, content: str, mode: str = "w") -> str:
+    from ..sandbox.context import require_current_sandbox
+
+    if mode not in ("w", "a"):
+        return "❌ 错误：mode 参数必须是 'w' (覆盖) 或 'a' (追加)。"
+    sb = require_current_sandbox()
+    virtual = _norm_virtual_path(filepath)
+    try:
+        payload = "\n" + content if mode == "a" and not content.startswith("\n") else content
+        sb.write_file(virtual, payload, append=(mode == "a"))
+    except Exception as e:
+        return f"写入失败：{e}"
+    action = "覆盖/新建" if mode == "w" else "追加"
+    return f" ● 成功以 {action} 模式写入文件：{filepath} (共 {len(content)} 字符)"
+
+
+def _sandbox_shell(command: str) -> str:
+    from ..sandbox.context import require_current_sandbox
+
+    if _SHELL_METACHARS.search(command) or _ENV_EXPANSION.search(command):
+        return "❌ 权限拒绝：受控命令不允许 shell 元字符、重定向、管道或环境变量展开。"
+    parts = shlex.split(command)
+    if not parts:
+        return "❌ 执行失败：命令为空。"
+    cmd = parts[0].lower()
+    args = parts[1:]
+    if cmd not in _ALLOWED_SHELL_COMMANDS:
+        return "❌ 权限拒绝：该命令不在安全白名单中。支持：pwd, echo, ls/dir, cat/type, mkdir。"
+
+    sb = require_current_sandbox()
+    out = f" ● 当前系统: {SYS_OS}\n ● 执行命令: `{command}`\n"
+    try:
+        if cmd == "pwd":
+            if args:
+                return "❌ pwd 不接受参数。"
+            return out + f" ● office 工位: {VIRTUAL_ROOT}"
+        if cmd == "echo":
+            return out + "\n[STDOUT]\n" + " ".join(args)
+        if cmd in ("ls", "dir"):
+            if len(args) > 1:
+                return "❌ ls/dir 最多接受一个相对目录参数。"
+            return out + "\n[STDOUT]\n" + _sandbox_list(args[0] if args else "")
+        if cmd in ("cat", "type"):
+            if not args:
+                return "❌ cat/type 需要至少一个文件参数。"
+            if len(args) > 5:
+                return "❌ cat/type 单次最多读取 5 个文件。"
+            chunks = [_sandbox_read(a) for a in args]
+            return out + "\n[STDOUT]\n" + "\n\n".join(chunks)
+        if cmd == "mkdir":
+            if not args:
+                return "❌ mkdir 需要至少一个目录参数。"
+            for a in args:
+                sb.make_dir(_norm_virtual_path(a))
+            return out + "\n[STDOUT]\n已创建目录: " + ", ".join(args)
+    except Exception as e:
+        return f"❌ 执行异常：{str(e)}"
+    return "❌ 未处理的受控命令。"
+
+
+def build_sandbox_tools(*, require_context: bool = True) -> list:
+    """构造 provider-backed 的四个 office 工具（名称/参数与 legacy 一致）。
+
+    require_context=True：无当前 Sandbox 上下文时 fail closed。
+    require_context=False：保留给需要延迟 Local fallback 的 legacy 直调场景。
+    """
+    from langchain_core.tools import StructuredTool
+
+    def _wrap(fn, legacy_tool):
+        def runner(**kwargs):
+            if require_context:
+                from ..sandbox.context import require_current_sandbox
+
+                require_current_sandbox()  # fail closed：无上下文先抛错
+            return fn(**kwargs)
+
+        return StructuredTool.from_function(
+            func=runner,
+            name=legacy_tool.name,
+            description=legacy_tool.description,
+            args_schema=legacy_tool.args_schema,
+        )
+
+    legacy = {
+        "list_office_files": list_office_files,
+        "read_office_file": read_office_file,
+        "write_office_file": write_office_file,
+        "execute_office_shell": execute_office_shell,
+    }
+    impls = {
+        "list_office_files": _sandbox_list,
+        "read_office_file": _sandbox_read,
+        "write_office_file": _sandbox_write,
+        "execute_office_shell": _sandbox_shell,
+    }
+    return [
+        _wrap(impls[name], legacy[name])
+        for name in ("list_office_files", "read_office_file", "write_office_file", "execute_office_shell")
+    ]
