@@ -407,3 +407,15 @@ BUILTIN_TOOLS = [
     delete_scheduled_task,
     modify_scheduled_task,
 ]
+
+# Phase 2：Agent 默认装配使用的静态核心工具（不含 office 四件套）。
+# office 四件套改由 build_sandbox_tools() 的 provider-backed 版本提供
+# （fail closed + 沙箱隔离）；legacy 版本保留在本列表，供独立脚本与
+# plugin_loader 的无沙箱回退路径使用。
+_OFFICE_TOOL_NAMES = {
+    "list_office_files",
+    "read_office_file",
+    "write_office_file",
+    "execute_office_shell",
+}
+STATIC_CORE_TOOLS = [t for t in BUILTIN_TOOLS if t.name not in _OFFICE_TOOL_NAMES]

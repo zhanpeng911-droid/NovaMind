@@ -61,3 +61,7 @@ for d in [WORKSPACE_DIR, MEMORY_DIR, PROFILE_BACKUP_DIR, PERSONAS_DIR, SCRIPTS_D
 
 # 日志级别配置
 LOG_LEVEL = os.getenv("NOVAMIND_LOG_LEVEL", "INFO")
+
+# 沙盒模式：第一版仅支持 local；docker 待镜像与真实 smoke test 就绪后启用，
+# 未知值由 build_default_sandbox_provider() fail closed 拒绝。
+SANDBOX_MODE = os.getenv("NOVAMIND_SANDBOX_MODE", "local").strip().lower()

@@ -150,8 +150,6 @@ async def async_main(thread_id: str | None = None):
     current_provider = os.getenv("DEFAULT_PROVIDER", "openai")
     current_model = os.getenv("DEFAULT_MODEL", "gpt-4o-mini")
 
-    bus = event_bus
-
     # 缺陷#2 修复：默认 CLI 运行时挂载记忆（L4/L5）与上下文治理中间件
     llm = get_provider(provider_name=current_provider, model_name=current_model)
     agent = create_agent_app(
@@ -159,6 +157,18 @@ async def async_main(thread_id: str | None = None):
         model_name=current_model,
         middlewares=build_default_middlewares(llm),
     )
+
+    try:
+        await _run_session(agent, thread_id)
+    finally:
+        # Phase 2 ownership：Agent 内部创建的 sandbox provider 由 aclose 关闭
+        await agent.aclose()
+
+
+async def _run_session(agent, thread_id: str | None):
+    """CLI 会话主体（输入循环、agent worker、心跳）。"""
+    bus = event_bus
+
     if not thread_id:
         thread_id = generate_thread_id()
 

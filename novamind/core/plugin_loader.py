@@ -19,7 +19,7 @@ from langchain_core.tools import StructuredTool
 from functools import lru_cache
 
 from .config import SKILLS_DIR, OFFICE_DIR
-from .tools.sandbox_tools import execute_office_shell
+from .tools.sandbox_tools import execute_office_shell, _sandbox_shell
 
 
 class DynamicSkillInput(BaseModel):
@@ -271,6 +271,13 @@ class PluginManager:
                 if not plugin.run_dir:
                     return "错误：该插件不在 office 工位内，出于沙盒安全限制无法执行 run 命令。"
                 actual_cmd = command.replace("{baseDir}", plugin.run_dir)
+                # Phase 2：Agent 上下文中存在 Sandbox 绑定时，复用同一 provider 的
+                # 沙箱执行（不允许落回 legacy Local 直写）；独立脚本等无沙箱场景
+                # 保持 legacy 直调行为。
+                from .sandbox.context import get_current_sandbox
+
+                if get_current_sandbox() is not None:
+                    return _sandbox_shell(actual_cmd)
                 return execute_office_shell.invoke({"command": actual_cmd})
             else:
                 return "错误：mode 参数只能是 'help' 或 'run'。"

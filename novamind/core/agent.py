@@ -20,9 +20,12 @@ from .middleware import MiddlewarePipeline, MiddlewareContext, timing_middleware
 from .middlewares import MiddlewareManager
 from .middlewares import MiddlewareContext as HookContext
 from .middlewares.orchestration_middleware import OrchestrationMiddleware
+from .middlewares.sandbox_middleware import SandboxMiddleware
 from .multiagent.bootstrap import build_delegate_tools
 from .provider import get_provider
-from .tools.builtins import BUILTIN_TOOLS
+from .tools.builtins import STATIC_CORE_TOOLS
+from .tools.sandbox_tools import build_sandbox_tools
+from .sandbox.contracts import SandboxProvider
 from .logger import AuditLogger
 from .token_tracker import TokenTracker
 from .context import ContextManager
@@ -118,6 +121,23 @@ def _default_model_router() -> ModelRouter | None:
         return None
 
 
+def build_default_sandbox_provider() -> SandboxProvider:
+    """按 NOVAMIND_SANDBOX_MODE 构建默认 SandboxProvider。
+
+    第一版仅支持 local；未知值 fail closed（直接拒绝启动，而不是悄悄落回
+    legacy 行为）。docker 待镜像与真实 smoke test 就绪后再放开。
+    """
+    from .config import SANDBOX_MODE
+    from .sandbox.local import LocalSandboxProvider
+
+    mode = (SANDBOX_MODE or "local").strip().lower()
+    if mode == "local":
+        return LocalSandboxProvider()
+    raise ValueError(
+        f"NOVAMIND_SANDBOX_MODE='{mode}' 暂无可用实现；当前仅支持 'local'。"
+    )
+
+
 def create_agent_app(
     provider_name: str | None = None,
     model_name: str | None = None,
@@ -127,6 +147,7 @@ def create_agent_app(
     audit_logger: AuditLogger | None = None,
     middlewares: list | None = None,
     model_router=None,
+    sandbox_provider: SandboxProvider | None = None,
 ):
     """
     创建NovaMind智能体应用
@@ -138,13 +159,18 @@ def create_agent_app(
             CLI/GUI 传入的 DEFAULT_PROVIDER 不会禁用已配置的后备链。
         model_name: 模型标识符。仅在路由链不可用时决定旧工厂的单 provider 模型；
             CLI/GUI 传入的 DEFAULT_MODEL 不会禁用已配置的后备链。
-        tools: 自定义工具列表（None则使用内置+动态插件+MCP+多Agent委派，pi 可用时）
+        tools: 自定义工具列表。None 则使用静态核心工具 + provider-backed 沙箱四件套
+            + 动态插件 + MCP + 多Agent委派，并自动挂 SandboxMiddleware（provider
+            未显式给出时经 build_default_sandbox_provider() 创建）。显式传入
+            （包括 []）时不注入沙箱四件套、不自动挂 SandboxMiddleware。
         checkpointer: 保留兼容性参数（不再使用）
         token_tracker: Token追踪器实例
         audit_logger: 审计日志器实例
         middlewares: 横切中间件列表（None则使用默认空管道，保持向后兼容）
         model_router: 可选 ModelRouter（显式提供时优先使用）。未提供时，若环境发现至少两个
             可路由 provider，则自动构造 FallbackChatModel；否则使用旧 provider 工厂。
+        sandbox_provider: 显式注入的 SandboxProvider（借用语义，由调用者负责关闭）。
+            tools=None 时未传入则内部创建（owned 语义，agent.aclose() 负责关闭）。
 
     Returns:
         NovaMindAgent 实例
@@ -158,8 +184,20 @@ def create_agent_app(
     _audit = audit_logger or AuditLogger()
     _tracker = token_tracker or TokenTracker()
 
+    # 沙箱装配（Phase 2）：
+    # - tools=None（默认装配）→ 必有 provider：未注入则构建默认（Local）
+    # - 显式 tools 且未注入 provider → 不挂沙箱生命周期（保持旧行为）
+    owns_sandbox_provider = sandbox_provider is None
+    if tools is None and owns_sandbox_provider:
+        sandbox_provider = build_default_sandbox_provider()
+
     # 横切中间件管理器（P0 接线：before/after_model、wrap_tool_call）
-    _middleware_manager = MiddlewareManager(middlewares)
+    # SandboxMiddleware 必须排在最前（OrchestrationMiddleware 之前），
+    # 使 delegate 能读到父 Sandbox 信息。
+    mw_list = list(middlewares) if middlewares else []
+    if sandbox_provider is not None:
+        mw_list.insert(0, SandboxMiddleware(sandbox_provider))
+    _middleware_manager = MiddlewareManager(mw_list)
 
     # 加载工具（内置 + 动态插件 + MCP服务 + 多 Agent 委派）
     delegate_tools: list = []
@@ -167,7 +205,11 @@ def create_agent_app(
         dynamic_tools = load_dynamic_skills()
         mcp_tools = load_mcp_tools()
         delegate_tools = build_delegate_tools()
-        actual_tools = BUILTIN_TOOLS + dynamic_tools + mcp_tools + delegate_tools
+        # office 四件套用 provider-backed 工厂版（fail closed），legacy 版本不进默认装配
+        actual_tools = (
+            STATIC_CORE_TOOLS + build_sandbox_tools()
+            + dynamic_tools + mcp_tools + delegate_tools
+        )
     else:
         actual_tools = tools
 
@@ -482,6 +524,8 @@ def create_agent_app(
         context_manager=context_manager,
         conversation_store=_store,
         middleware_manager=_middleware_manager,
+        sandbox_provider=sandbox_provider,
+        owns_sandbox_provider=owns_sandbox_provider,
     )
 
     agent.add_node("agent", agent_node, description="LLM推理节点")

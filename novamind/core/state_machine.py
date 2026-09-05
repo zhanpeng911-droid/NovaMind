@@ -10,6 +10,7 @@ NovaMind 自定义状态机引擎
   - SQLite持久化（对话历史跨会话保存）
 """
 from __future__ import annotations
+import asyncio
 import json
 import os
 import threading
@@ -35,10 +36,13 @@ class AgentState:
     messages: 完整对话历史（由 add_messages 归约器管理）
     summary: 上下文压缩后的摘要文本
     metadata: 额外元数据（Token用量、轮次计数等）
+    sandbox: 运行时字段——当前 run 绑定的 Sandbox 对象（SandboxMiddleware 维护）。
+        仅存在于内存状态，不写入 conversation SQLite（持久化只存 messages/summary）。
     """
     messages: list[BaseMessage] = field(default_factory=list)
     summary: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    sandbox: Any = field(default=None, repr=False, compare=False)
 
     def add_message(self, msg: BaseMessage) -> None:
         """添加一条消息到历史记录"""
@@ -343,6 +347,8 @@ class NovaMindAgent:
         conversation_store: ConversationStore | None = None,
         middleware_manager: MiddlewareManager | None = None,
         max_cached_states: int = 256,
+        sandbox_provider=None,
+        owns_sandbox_provider: bool = False,
     ):
         self._nodes: dict[str, Node] = {}
         self._edges: list[Edge] = []
@@ -351,6 +357,12 @@ class NovaMindAgent:
         self._context_manager = context_manager
         self._store = conversation_store
         self._middleware_manager = middleware_manager or MiddlewareManager()
+
+        # 沙箱生命周期所有权（Phase 2）：
+        # - Agent 内部创建的 provider（owns=True）由 aclose() 负责关闭
+        # - 外部注入的 provider 由调用者关闭，Agent 不会擅自 shutdown
+        self._sandbox_provider = sandbox_provider
+        self._owns_sandbox_provider = bool(owns_sandbox_provider)
 
         # 状态在Agent级别维护：跨run/astream调用保持对话连贯
         # OrderedDict 支持 LRU 淘汰：长驻 webui/GUI 进程防状态字典随会话数无限增长
@@ -366,6 +378,19 @@ class NovaMindAgent:
     @property
     def conversation_store(self) -> ConversationStore | None:
         return self._store
+
+    @property
+    def sandbox_provider(self):
+        return self._sandbox_provider
+
+    async def aclose(self) -> None:
+        """释放 Agent 持有的运行时资源。
+
+        仅关闭内部创建（owned）的 sandbox provider；外部注入的 provider
+        由调用者负责关闭，这里不碰。"""
+        if self._sandbox_provider is not None and self._owns_sandbox_provider:
+            provider, self._sandbox_provider = self._sandbox_provider, None
+            await asyncio.to_thread(provider.shutdown)
 
     async def _dispatch_hook(self, hook: str, state: AgentState, thread_id: str) -> None:
         """分发中间件钩子并把结果应用到 state（before/after_agent 用）。"""
@@ -493,64 +518,74 @@ class NovaMindAgent:
         self._mark_pending_persist(state, [user_msg])
         state.metadata["iteration"] = 0
 
-        # 分发 before_agent 钩子（记忆预载 / 沙箱恢复等横切关注点）
-        await self._dispatch_hook("before_agent", state, thread_id)
+        # after_agent 恰好一次保证：正常收尾在 try 内分发并置位；
+        # 异常/取消路径由 finally 补发（沙箱 release 等资源回收依赖此语义）。
+        after_dispatched = False
+        try:
+            # 分发 before_agent 钩子（记忆预载 / 沙箱恢复等横切关注点）。
+            # 放在 try 内：若后注册的中间件在 before 阶段抛错，
+            # 已 acquire 的沙箱仍能经 finally 的 after_agent 释放。
+            await self._dispatch_hook("before_agent", state, thread_id)
 
-        current = "agent"
-        visited_edges: list[str] = []
+            current = "agent"
+            visited_edges: list[str] = []
 
-        while current != "__end__" and state.metadata["iteration"] < max_iterations:
-            state.metadata["iteration"] += 1
+            while current != "__end__" and state.metadata["iteration"] < max_iterations:
+                state.metadata["iteration"] += 1
 
-            if current not in self._nodes:
-                raise ValueError(f"未找到节点: {current}")
+                if current not in self._nodes:
+                    raise ValueError(f"未找到节点: {current}")
 
-            node = self._nodes[current]
-            updates = await node.execute(state)
+                node = self._nodes[current]
+                updates = await node.execute(state)
 
-            # 应用状态更新
-            if "messages" in updates:
-                new_msgs = updates["messages"]
-                removes = [m for m in new_msgs if isinstance(m, RemoveMessage)]
-                if removes:
-                    state.remove_messages([m.id for m in removes if m.id])
-                additions = [m for m in new_msgs if not isinstance(m, RemoveMessage)]
-                state.add_messages(additions)
-                self._mark_pending_persist(state, additions)
+                # 应用状态更新
+                if "messages" in updates:
+                    new_msgs = updates["messages"]
+                    removes = [m for m in new_msgs if isinstance(m, RemoveMessage)]
+                    if removes:
+                        state.remove_messages([m.id for m in removes if m.id])
+                    additions = [m for m in new_msgs if not isinstance(m, RemoveMessage)]
+                    state.add_messages(additions)
+                    self._mark_pending_persist(state, additions)
 
-            if "summary" in updates:
-                state.summary = updates["summary"]
-            if "metadata" in updates:
-                state.metadata.update(updates["metadata"])
+                if "summary" in updates:
+                    state.summary = updates["summary"]
+                if "metadata" in updates:
+                    state.metadata.update(updates["metadata"])
 
-            edge = self._find_edge(current)
-            if edge is None:
-                break
+                edge = self._find_edge(current)
+                if edge is None:
+                    break
 
-            next_node = edge.resolve(state)
-            visited_edges.append(f"{current}->{next_node}")
-            current = next_node
+                next_node = edge.resolve(state)
+                visited_edges.append(f"{current}->{next_node}")
+                current = next_node
 
-        state.metadata["visited_edges"] = visited_edges
+            state.metadata["visited_edges"] = visited_edges
 
-        # 检查是否因达到最大迭代次数而退出
-        if state.metadata["iteration"] >= max_iterations:
-            state.metadata["max_iterations_reached"] = True
-            if self._logger:
-                self._logger.log_event(
-                    thread_id=thread_id,
-                    event="system_action",
-                    action=f"达到最大迭代次数 {max_iterations}，智能体循环终止",
-                    iteration=state.metadata["iteration"],
-                )
+            # 检查是否因达到最大迭代次数而退出
+            if state.metadata["iteration"] >= max_iterations:
+                state.metadata["max_iterations_reached"] = True
+                if self._logger:
+                    self._logger.log_event(
+                        thread_id=thread_id,
+                        event="system_action",
+                        action=f"达到最大迭代次数 {max_iterations}，智能体循环终止",
+                        iteration=state.metadata["iteration"],
+                    )
 
-        # 分发 after_agent 钩子（报告合成 / 反思等收尾关注点）
-        await self._dispatch_hook("after_agent", state, thread_id)
+            # 分发 after_agent 钩子（报告合成 / 反思等收尾关注点）
+            await self._dispatch_hook("after_agent", state, thread_id)
+            after_dispatched = True
 
-        # 持久化到数据库
-        self._persist_state(thread_id, state)
+            # 持久化到数据库
+            self._persist_state(thread_id, state)
 
-        return state
+            return state
+        finally:
+            if not after_dispatched:
+                await self._dispatch_hook("after_agent", state, thread_id)
 
     async def astream(
         self,
@@ -569,67 +604,75 @@ class NovaMindAgent:
         self._mark_pending_persist(state, [user_msg])
         state.metadata["iteration"] = 0
 
-        # 分发 before_agent 钩子
-        await self._dispatch_hook("before_agent", state, thread_id)
+        # 与 run() 相同的 after_agent 恰好一次保证；astream 被提前 close
+        # （GeneratorExit）或取消时，finally 仍补发 after_agent 释放沙箱资源。
+        after_dispatched = False
+        try:
+            # 分发 before_agent 钩子
+            await self._dispatch_hook("before_agent", state, thread_id)
 
-        current = "agent"
-        visited_edges: list[str] = []
+            current = "agent"
+            visited_edges: list[str] = []
 
-        while current != "__end__" and state.metadata["iteration"] < max_iterations:
-            state.metadata["iteration"] += 1
+            while current != "__end__" and state.metadata["iteration"] < max_iterations:
+                state.metadata["iteration"] += 1
 
-            if current not in self._nodes:
-                break
+                if current not in self._nodes:
+                    break
 
-            node = self._nodes[current]
-            updates = await node.execute(state)
+                node = self._nodes[current]
+                updates = await node.execute(state)
 
-            # 应用状态更新
-            if "messages" in updates:
-                new_msgs = updates["messages"]
-                removes = [m for m in new_msgs if isinstance(m, RemoveMessage)]
-                if removes:
-                    state.remove_messages([m.id for m in removes if m.id])
-                additions = [m for m in new_msgs if not isinstance(m, RemoveMessage)]
-                state.add_messages(additions)
-                self._mark_pending_persist(state, additions)
-            if "summary" in updates:
-                state.summary = updates["summary"]
-            if "metadata" in updates:
-                state.metadata.update(updates["metadata"])
+                # 应用状态更新
+                if "messages" in updates:
+                    new_msgs = updates["messages"]
+                    removes = [m for m in new_msgs if isinstance(m, RemoveMessage)]
+                    if removes:
+                        state.remove_messages([m.id for m in removes if m.id])
+                    additions = [m for m in new_msgs if not isinstance(m, RemoveMessage)]
+                    state.add_messages(additions)
+                    self._mark_pending_persist(state, additions)
+                if "summary" in updates:
+                    state.summary = updates["summary"]
+                if "metadata" in updates:
+                    state.metadata.update(updates["metadata"])
 
-            yield {current: updates}
+                yield {current: updates}
 
-            edge = self._find_edge(current)
-            if edge is None:
-                break
+                edge = self._find_edge(current)
+                if edge is None:
+                    break
 
-            next_node = edge.resolve(state)
-            visited_edges.append(f"{current}->{next_node}")
-            current = next_node
+                next_node = edge.resolve(state)
+                visited_edges.append(f"{current}->{next_node}")
+                current = next_node
 
-        # 检查是否因达到最大迭代次数而退出
-        if state.metadata["iteration"] >= max_iterations:
-            state.metadata["max_iterations_reached"] = True
-            if self._logger:
-                self._logger.log_event(
-                    thread_id=thread_id,
-                    event="system_action",
-                    action=f"达到最大迭代次数 {max_iterations}，智能体循环终止",
-                    iteration=state.metadata["iteration"],
-                )
-            # 通知消费者：因迭代上限终止
-            yield {"__limit__": {
-                "max_iterations": max_iterations,
-                "iteration": state.metadata["iteration"],
-            }}
+            # 检查是否因达到最大迭代次数而退出
+            if state.metadata["iteration"] >= max_iterations:
+                state.metadata["max_iterations_reached"] = True
+                if self._logger:
+                    self._logger.log_event(
+                        thread_id=thread_id,
+                        event="system_action",
+                        action=f"达到最大迭代次数 {max_iterations}，智能体循环终止",
+                        iteration=state.metadata["iteration"],
+                    )
+                # 通知消费者：因迭代上限终止
+                yield {"__limit__": {
+                    "max_iterations": max_iterations,
+                    "iteration": state.metadata["iteration"],
+                }}
 
-        # 分发 after_agent 钩子
-        await self._dispatch_hook("after_agent", state, thread_id)
+            # 分发 after_agent 钩子
+            await self._dispatch_hook("after_agent", state, thread_id)
+            after_dispatched = True
 
-        # 流式执行结束后持久化
-        state.metadata["visited_edges"] = visited_edges
-        self._persist_state(thread_id, state)
+            # 流式执行结束后持久化
+            state.metadata["visited_edges"] = visited_edges
+            self._persist_state(thread_id, state)
+        finally:
+            if not after_dispatched:
+                await self._dispatch_hook("after_agent", state, thread_id)
 
     def clear_conversation(self, thread_id: str) -> None:
         """清除指定会话的所有数据（内存+数据库）"""
