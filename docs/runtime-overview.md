@@ -16,6 +16,10 @@ Architecture layers:
 - Cross-cutting middleware on five hooks (before/after agent, before/after model, wrap tool call): memory recall, skill injection, context governance, orchestration.
 - Five-layer long-term memory: schema, Ebbinghaus decay, BM25 retrieval (jieba for Chinese), per-call injection, background consolidation.
 - Three-component sandbox (runtime + path translator + security guard): local zero-trust allowlist, docker mount-zone enforcement, warm pool.
+  Status: Local **[已接线]** (default agent path, fail-closed tools), Docker **[组件存在]** (mocked tests only, no image definition yet).
+- Per-thread concurrency **[已实测]**: same-thread runs serialize, cross-thread runs overlap, half-turns roll back on cancel/disconnect, active state is pinned against LRU eviction.
+- Conversation persistence **[已实测]**: single-transaction batch writes, WAL + busy_timeout, stable keyset pagination (`load_message_page` / `list_thread_page`).
+- Web runtime **[已实测]**: loopback-only binding, capacity-bounded /chat, unified error shape, versioned pagination cursors — see `docs/webui-api.md`.
 - Three-layer skill system: SQLite store with version DAG and four counters, L2 evolution (mutate → gate → ratchet), L3 evaluation; 37 builtin skills.
 - Multi-agent delegation (subagent fork and external specialist) sharing the parent sandbox.
 

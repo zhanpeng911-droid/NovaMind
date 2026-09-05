@@ -74,3 +74,10 @@ jobs:
           novamind/core/task_store.py
           novamind/core/skill/types.py
           novamind/core/sandbox/types.py
+      - name: Mypy second batch (hardening Phase 7)
+        run: >-
+          uv run --no-sync mypy
+          novamind/core/middlewares/sandbox_middleware.py
+          novamind/webui/api_models.py
+          novamind/webui/runtime.py
+          novamind/core/context.py

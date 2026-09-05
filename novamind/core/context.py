@@ -228,7 +228,7 @@ class ContextManager:
         recent_turns = turns[-keep:]
         discarded_turns = turns[:-keep]
 
-        final_messages: list[BaseMessage] = []
+        final_messages = []
         if first_system:
             final_messages.append(first_system)
         for turn in recent_turns:

@@ -163,7 +163,7 @@ novamind run             # 命令行交互
 | `novamind config` | 交互式配置向导，写入 `.env`。 |
 | `novamind doctor` | 架构健康体检：分层自检 provider / 记忆 / 技能 / 沙箱 / 中间件 + 退化信号。 |
 | `novamind doctor --json` | 以 JSON 输出诊断结果；适合脚本或 CI，出现错误返回非零退出码。 |
-| `novamind gui` | 启动桌面图形界面（pywebview 窗口，WorkBuddy 风格布局：侧边栏 + 对话区 + 监控/诊断/技能面板）。 |
+| `novamind gui` | 启动桌面图形界面（pywebview 窗口，WorkBuddy 风格布局：侧边栏 + 对话区 + 监控/诊断/技能面板）。后端仅绑定 loopback（127.0.0.1/localhost/::1），`0.0.0.0`/LAN IP 在启动前被拒绝；/chat 有并发容量上限（`NOVAMIND_WEB_MAX_MODELS`，默认 4）。 |
 | `novamind run` | 交互式 Agent 主循环。 |
 | `novamind run --thread-id demo` | 使用指定 `thread_id` 运行或恢复会话。 |
 | `novamind monitor --list` | 列出可监控的会话。 |
@@ -221,10 +221,12 @@ NovaMind 支持多 provider 链式降级：瞬时错误（超时/限流/5xx）�
 
 NovaMind 把运行时行为约束在明确的边界内，而不是将工具视为任意执行能力：
 
-- **Local 沙箱（零信任）**：文件操作收敛到工位目录，路径穿越（`..` 段 + resolve 越界）被拒绝；Shell 仅白名单命令（`pwd/echo/ls/dir/cat/type/mkdir`），拦截 shell 元字符、环境变量展开与解释器逃逸。
-- **Docker 沙箱**：写入与重定向目标强制落在 `/mnt/novamind/user_data/` 挂载区，防止产物丢在容器 `/tmp` 被 `--rm` 清掉。
+- **Local 沙箱（零信任，默认已接线）**：文件操作收敛到工位目录，路径穿越（`..` 段 + resolve 越界）被拒绝；Shell 仅白名单命令（`pwd/echo/ls/dir/cat/type/mkdir`），拦截 shell 元字符、环境变量展开与解释器逃逸。默认 Agent 装配使用 provider-backed 沙箱工具（`SandboxMiddleware` 为每轮 run 绑定 per-thread Sandbox，无上下文即 fail closed）；`NOVAMIND_SANDBOX_MODE` 仅支持 `local`，未知值启动即拒绝。
+- **Docker 沙箱（组件存在，未列入默认）**：provider/warm pool/WSL executor/路径强制（写入与重定向目标必须落在 `/mnt/novamind/user_data/`）均有实现与 mock 测试，但仓库尚无镜像定义、未做真实 smoke，在 `tests/functional/test_docker_smoke.py` 可对真实镜像跑通前不宣称 Docker 为默认运行模式。
+- **Web 边界**：GUI 后端仅绑定 loopback（启动前拒绝非 loopback host）；请求体上限（默认 1MB，413）、/chat 仅 JSON（415）、统一错误形状（4xx/5xx）、带版本分页游标（非法 400）。详见 `docs/webui-api.md`。
 - **策略层**：`HarnessPolicy` 定义默认允许的工具与需确认的高风险关键词，命中即拦截或生成审计事件。
 - **兜底安全**：降级只切瞬时错误，401/400 鉴权与参数错误不降级，避免把密钥泄露给错误 provider。
+- **并发语义**：同一 thread 的对话/删除互斥（per-thread 协调器），不同 thread 并发重叠；取消/断连回滚半轮状态且沙箱恰好释放一次；批量持久化单事务提交（WAL + busy_timeout）。
 
 ---
 
@@ -264,17 +266,20 @@ NovaMind/
 
 ```powershell
 uv sync --extra dev                          # 安装依赖（严格按 uv.lock）
-uv run --no-sync pytest tests -q             # 全量 614 个测试
+uv run --no-sync pytest tests -q             # 全量 663 个测试
 uv run --no-sync pytest tests/unit -q        # 单元层
 uv run --no-sync pytest tests/integration -q # 集成/端到端层
 uv run --no-sync ruff check novamind entry tests   # Lint（CI 强制）
 uv run --no-sync mypy novamind/core/policy.py novamind/core/token_tracker.py     novamind/core/event_bus.py novamind/core/task_store.py     novamind/core/skill/types.py novamind/core/sandbox/types.py  # 类型检查（首批）
+uv run --no-sync mypy novamind/core/middlewares/sandbox_middleware.py     novamind/webui/api_models.py novamind/webui/runtime.py novamind/core/context.py  # 类型检查（第二批，加固 Phase 7）
 novamind doctor --json                       # 运行时自检
 ```
 
 可选：`uv run --no-sync pre-commit install` 启用 Git 钩子（提交前 ruff 检查、推送前单元测试冒烟）。
 
 **发布前必跑（真实 LLM 全功能验收）**：`uv run --no-sync pytest tests/functional -q`（Part A/B/C，缺 key 自动跳过）。CI 不跑 functional，属发布前手动门禁；环境与遗留项见 `docs/functional-report.md` 的最新修复记录。
+
+**真实 Docker smoke（opt-in）**：`uv run --no-sync pytest tests/functional/test_docker_smoke.py -v`——验证创建、挂载区写入/读回、release/reacquire、拒绝 mount 外写；docker daemon 或 `novamind-sandbox:latest` 镜像不可用时自动 skip（仓库尚无镜像定义，Docker 未列入默认运行模式）。
 
 - **Python**：3.12–3.13（CI 矩阵同版本；3.14 因 langchain-openai 导入期 SSL 崩溃暂排除）
 - **覆盖率**：全量约 81%，CI 底线 `--cov-fail-under=78`，只升不降

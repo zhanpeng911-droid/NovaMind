@@ -1,13 +1,13 @@
 # NovaMind 总测试报告（Master）
 
 > 一份看懂全部测试与质量状态。本文件是**唯一入口**，把三轮质量工程 + 全功能验收整合在一起；粒度细节在各轮子文档（见附录索引）。
-> 最新更新：2026-08-26。
+> 最新更新：2026-09-05（八阶段加固计划 Phase 0-7 完成）。
 
 ---
 
 ## 一、一句话快照
 
-**563 个常规自动化测试（unit + integration）全绿，覆盖 81%、CI 底线 78；34 个真实/环境功能验收用例（Part A/B/C）31 过、1 环境失败（docker daemon 未启动）、2 跳过；真实 LLM（DeepSeek）19/19 全过。README 宣称的每一项能力都已实际验过或明确标记状态。**
+**663 个常规自动化测试（unit + integration）全绿，覆盖 82.6%、CI 底线 78；八阶段加固计划（Phase 0-7）全部落地：沙箱三组件接入默认 Agent 链路（fail closed）、per-thread 并发/取消回滚、SQLite 原子批量写入与稳定分页、WebRuntime 生命周期 + loopback-only + 统一 API 边界、前端按会话隔离。真实环境 smoke：真实 LLM office write/read/list 全链路、GUI 双 thread 并发、真实 LLM SSE 对话均通过。Docker 模式如实标记"组件存在、未实测"（无镜像定义），opt-in smoke 已就位。**
 
 一次跑完全部：
 ```bash
@@ -186,6 +186,27 @@ uv run --no-sync mypy novamind/core/policy.py novamind/core/token_tracker.py \
 - 遗留：MCP 适配器更深的行为测试（真实 server 往返）待 `mcp` 依赖就绪后补。
 
 ---
+
+## 九、八阶段加固实施记录（2026-09-05，Phase 0-7 全部完成）
+
+| Phase | 提交 | 内容 | 验证 |
+|---|---|---|---|
+| 0 契约冻结 | `96d2cf0` | office 工具 golden contract + Web API 成功响应契约（防重构破坏） | 595 过 |
+| 1 façade | `d513853` | provider-backed office 工具工厂 + ContextVar 沙箱上下文 + make_dir/list_dir_typed 原语 | 608 过 |
+| 2 接线 | `35dec3b` | SandboxMiddleware（acquire/绑定/恰好一次释放）+ AgentState.sandbox + 默认装配切工厂工具 + provider ownership + CLI aclose | 626 过 |
+| 3 并发 | `7e2f2ea` | per-thread 协调器（同 thread 串行/跨 thread 重叠）、半轮取消回滚、active pin、generate_summary_result 不可变结果、FallbackChatModel._active 加锁、webui 切 aclear_conversation | 638 过 |
+| 4 持久化 | `ed965ea` | save_messages 单事务、WAL+busy_timeout+索引、load_message_page/list_thread_page 稳定分页（消除 N+1）、webui to_thread | 646 过 |
+| 5 Web 运行时 | `ed735ca` | WebRuntime（lifespan/容量/task registry/关闭顺序）、SSE 断连语义（done 仅正常完成）、413/415/统一错误形状、带版本分页游标、loopback-only 守卫 | 663 过 |
+| 6 前端隔离 | `6145ac2` | 按会话隔离状态 + 请求 token 丢弃晚到帧 + STOP 按钮 + fetchJson + 分页 UI（加载更早/加载更多） | 663 过 |
+| 7 收尾 | 本提交 | docs/webui-api.md + 三状态文档标记 + README 实测化 + Docker opt-in smoke + mypy 第二批 | 门禁见下 |
+
+最终门禁（CI 同款命令实测）：`pytest tests -q --cov=novamind --cov-fail-under=78` → **663 passed / 82.6%**；`ruff check novamind entry tests` → 0 错误；mypy 两批 10 文件 → 0 错误；`git diff --check` → 干净。
+
+真实环境 smoke（本机，DeepSeek）：
+- CLI 默认模型 office 全链路：LLM 连续调用 write_office_file / read_office_file / list_office_file 各一次，写→读→列内容一致 ✅
+- 双 thread 并发：两个 thread 同时 astream（真实 LLM），互不串话，合计 0.9s ✅
+- WebUI：lifespan 启动 + 真实 LLM SSE 对话（thread→text→done）+ 非 JSON 415 统一错误形状 ✅
+- GUI 非 loopback 绑定拒绝：单测覆盖（0.0.0.0/::/LAN IP/hostname）✅
 
 ## 九、附录索引（粒度细节在各子文档）
 
