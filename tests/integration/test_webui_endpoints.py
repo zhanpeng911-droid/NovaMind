@@ -8,6 +8,7 @@ WebUI 端点错误分支 + app.py 启动辅助单元测试（P1 覆盖率盲区�
   - /skills store 异常 → error 字段而非 500
   - app._wait_for_server：就绪返回 / 超时抛 TimeoutError
 """
+import json
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
@@ -212,6 +213,108 @@ class TestRunGui(unittest.TestCase):
             run_gui()
         browser.assert_called_once_with("http://127.0.0.1:8765")
         self.assertTrue(server.should_exit)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class TestApiSuccessContract(unittest.TestCase):
+    """加固 Phase 0：冻结 REST 成功响应的顶层字段。
+
+    Phase 4/5 的分页只允许"新增"字段（如 pagination）；改名/删除即违约。
+    """
+
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def test_sessions_contract(self):
+        rec = {"thread_id": "t", "title": "会话", "message_count": 1, "last_ts": "2026-01-01"}
+        with patch("novamind.webui.server.get_history_store") as gh:
+            gh.return_value.list_threads.return_value = [rec]
+            body = self.client.get("/sessions").json()
+        self.assertEqual(set(body.keys()), {"sessions"})
+        self.assertEqual(body["sessions"][0]["thread_id"], "t")
+
+    def test_history_contract(self):
+        from langchain_core.messages import AIMessage
+        with patch("novamind.webui.server.get_history_store") as gh:
+            gh.return_value.load_messages.return_value = [AIMessage(content="ok")]
+            body = self.client.get("/history/t1").json()
+        self.assertEqual(set(body.keys()), {"messages"})
+
+    def test_skills_contract(self):
+        store = MagicMock()
+        store.list_active.return_value = []
+        with patch("novamind.webui.server.get_skill_store", return_value=store):
+            body = self.client.get("/skills").json()
+        self.assertEqual(set(body.keys()), {"skills", "count"})
+        self.assertEqual(body["count"], 0)
+
+    def test_monitor_events_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("novamind.webui.server.LOG_DIR", tmp):
+                body = self.client.get("/monitor/events/none").json()
+        self.assertEqual(set(body.keys()), {"events"})
+
+    def test_health_contract(self):
+        self.assertEqual(self.client.get("/health").json(), {"status": "ok"})
+
+
+class TestSseChatContract(unittest.TestCase):
+    """冻结 /chat SSE 事件类型与顺序：thread → [tool|text]* → done。"""
+
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def test_chat_stream_event_types_and_fields(self):
+        from langchain_core.messages import AIMessage
+
+        class _FakeStreamAgent:
+            async def astream(self, message, thread_id=None):
+                yield {"agent": {"messages": [AIMessage(content="", tool_calls=[
+                    {"name": "calculator", "args": {}, "id": "1"}])]}}
+                yield {"agent": {"messages": [AIMessage(content="算好了")]}}
+
+        frames = []
+        with patch("novamind.webui.server.get_agent", return_value=_FakeStreamAgent()):
+            with self.client.stream("POST", "/chat",
+                                    json={"message": "算一下", "thread_id": "sse_t"}) as resp:
+                self.assertEqual(resp.status_code, 200)
+                for line in resp.iter_lines():
+                    if line.startswith("data: "):
+                        frames.append(json.loads(line[len("data: "):]))
+
+        types = [f["type"] for f in frames]
+        self.assertEqual(types[0], "thread")
+        self.assertIn("thread_id", frames[0])          # thread 帧携带 thread_id（前端依赖）
+        self.assertIn("tool", types)                     # 工具帧
+        self.assertIn("text", types)                     # 文本帧
+        self.assertEqual(types[-1], "done")              # done 恒为最后一帧
+        tool_frame = next(f for f in frames if f["type"] == "tool")
+        self.assertEqual(tool_frame["name"], "calculator")
+        text_frame = next(f for f in frames if f["type"] == "text")
+        self.assertIn("content", text_frame)
+
+
+class TestOpenApiContract(unittest.TestCase):
+    """冻结 OpenAPI 路由面（Phase 5 改 SSE 声明/响应模型时同步更新本类）。"""
+
+    def test_all_known_routes_present(self):
+        schema = app.openapi()
+        expected = {
+            "/chat", "/health", "/doctor",
+            "/monitor/sessions", "/monitor/events/{thread_id}",
+            "/skills", "/sessions", "/history/{thread_id}", "/sessions/{thread_id}",
+        }
+        self.assertTrue(expected.issubset(schema["paths"].keys()),
+                        f"路由缺失: {expected - set(schema['paths'].keys())}")
+
+    def test_chat_is_post_and_sessions_is_get(self):
+        schema = app.openapi()
+        self.assertIn("post", schema["paths"]["/chat"])
+        self.assertIn("get", schema["paths"]["/sessions"])
+        self.assertIn("delete", schema["paths"]["/sessions/{thread_id}"])
 
 
 if __name__ == "__main__":
