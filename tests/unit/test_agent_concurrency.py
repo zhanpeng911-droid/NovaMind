@@ -14,7 +14,7 @@ import os
 import tempfile
 import unittest
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from novamind.core.middlewares import MiddlewareManager
 from novamind.core.state_machine import AgentState, ConversationStore, NovaMindAgent
@@ -346,6 +346,207 @@ class TestFinalizationOnceAndRollback(unittest.TestCase):
         self.assertEqual([m.content for m in state.messages], [])
         self.assertEqual(agent._persisted_counts.get("t_persist_fail", 0), 0,
                          "持久化计数必须回滚到轮次前")
+        store.close()
+
+
+
+
+class TestAtomicTurnCommit(unittest.TestCase):
+    """收尾修复 Phase 1：一轮消息 + 摘要原子提交，失败整批回滚。"""
+
+    def _fresh_store(self):
+        import os
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="novamind_atomic_")
+        return ConversationStore(db_path=os.path.join(tmp, "state.sqlite3")), tmp
+
+    @staticmethod
+    def _install_summary_failure(store) -> None:
+        """在 summaries 表装 BEFORE INSERT 触发器：任何摘要写入 RAISE(ABORT)。
+
+        故障发生在真实写入事务内部——消息 INSERT 已执行、摘要触发失败，
+        事务回滚必须把消息一起撤销。"""
+        with store._lock:
+            import sqlite3
+            conn = sqlite3.connect(store._db_path)
+            try:
+                conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS fail_summary
+                    BEFORE INSERT ON summaries
+                    BEGIN SELECT RAISE(ABORT, 'summary disk full'); END
+                """)
+                conn.commit()
+            finally:
+                conn.close()
+
+    @staticmethod
+    def _drop_summary_failure(store) -> None:
+        with store._lock:
+            import sqlite3
+            conn = sqlite3.connect(store._db_path)
+            try:
+                conn.execute("DROP TRIGGER IF EXISTS fail_summary")
+                conn.commit()
+            finally:
+                conn.close()
+
+    def test_save_turn_commit_and_rollback(self):
+        """save_turn 消息+摘要同事务；摘要 SQL 失败则消息也不落库。"""
+        store, _ = self._fresh_store()
+        msgs = [HumanMessage(content="user"), AIMessage(content="reply")]
+
+        store.save_turn("t1", msgs, summary="摘要")
+        self.assertEqual([m.content for m in store.load_messages("t1")],
+                         ["user", "reply"])
+        self.assertEqual(store.load_summary("t1"), "摘要")
+
+        # 摘要写入失败（触发器 RAISE(ABORT) → sqlite3.IntegrityError）：
+        # 消息 INSERT 已执行但事务未提交
+        import sqlite3
+        self._install_summary_failure(store)
+        with self.assertRaises(sqlite3.IntegrityError):
+            store.save_turn("t2", msgs, summary="s")
+        self._drop_summary_failure(store)
+        # 整批回滚：t2 无任何消息、无摘要
+        self.assertEqual(store.load_messages("t2"), [])
+        self.assertEqual(store.load_summary("t2"), "")
+        store.close()
+
+    def test_save_turn_summary_none_and_empty(self):
+        store, _ = self._fresh_store()
+        store.save_turn("t3", [HumanMessage(content="m1")])
+        self.assertEqual(store.load_summary("t3"), "")
+        store.save_turn("t3", [], summary="")
+        self.assertEqual(store.load_summary("t3"), "")
+        store.save_turn("t3", [], summary="新摘要")
+        self.assertEqual(store.load_summary("t3"), "新摘要")
+        store.close()
+
+    def test_persist_failure_rolls_back_and_cross_instance_reload(self):
+        """摘要写入失败 → 本轮消息不落库；新 Agent 重载也没有失败轮次。"""
+        import os
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="novamind_atomic2_")
+        db = os.path.join(tmp, "state.sqlite3")
+        store = ConversationStore(db_path=db)
+
+        seed = NovaMindAgent(conversation_store=store)
+        seed._get_or_create_state("t_atomic").add_message(_mkmsg("old"))
+        seed._persist_state("t_atomic", seed._states["t_atomic"])
+        self.assertEqual([m.content for m in store.load_messages("t_atomic")], ["old"])
+
+        async def reply_node(s):
+            return {"messages": [_mkmsg("reply2")]}
+
+        agent = NovaMindAgent(conversation_store=store)
+        agent.add_node("agent", reply_node)
+        agent.add_conditional_edge("agent", lambda s: "__end__", {"__end__": "__end__"})
+
+        state = agent._get_or_create_state("t_atomic")
+        state.summary = "本轮摘要"
+        import sqlite3
+        self._install_summary_failure(store)
+        try:
+            with self.assertRaises(sqlite3.IntegrityError):
+                asyncio.run(agent._execute_turn(state, "hi", "t_atomic", 50))
+        finally:
+            self._drop_summary_failure(store)
+
+        # 数据库没有第二轮消息
+        self.assertEqual([m.content for m in store.load_messages("t_atomic")], ["old"])
+        # 新 Agent 重载结果一致
+        reloaded = NovaMindAgent(conversation_store=store)
+        st2 = reloaded._get_or_create_state("t_atomic")
+        self.assertEqual([m.content for m in st2.messages], ["old"])
+        self.assertEqual(reloaded._persisted_counts.get("t_atomic"), 1)
+        store.close()
+
+    def test_nested_metadata_mutation_hook_executed_then_rolled_back(self):
+        """执行型回归：节点真实 dispatch before_model，hook 原地修改嵌套
+        governance dict 后取消，先证明已修改、再证明已还原。"""
+        state = AgentState()
+        state.metadata["governance"] = {"warned": False, "n": 1}
+        changed = asyncio.Event()
+        entered = asyncio.Event()
+
+        class GovernanceMutator:
+            async def abefore_model(self, ctx):
+                gov = ctx.state.metadata["governance"]
+                gov["warned"] = True      # 原地修改嵌套 dict
+                gov["n"] += 1
+                changed.set()
+                return None
+
+        agent = NovaMindAgent(
+            middleware_manager=MiddlewareManager([GovernanceMutator()])
+        )
+
+        async def slow_node(s):
+            # 模拟 agent_node 行为：真实 dispatch before_model（hook 在此
+            # 原地修改嵌套 governance），再挂起等待取消
+            from novamind.core.middlewares import MiddlewareContext
+
+            await agent._middleware_manager.dispatch(
+                "before_model", MiddlewareContext(state=s, thread_id="t_gov")
+            )
+            entered.set()
+            await asyncio.sleep(5)
+            return {"messages": [_mkmsg("never")]}
+
+        agent.add_node("agent", slow_node)
+        agent.add_conditional_edge("agent", lambda s: "__end__", {"__end__": "__end__"})
+        agent._states["t_gov"] = state
+
+        async def _run():
+            task = asyncio.create_task(agent._execute_turn(state, "hi", "t_gov", 50))
+            await changed.wait()
+            gov = state.metadata["governance"]
+            # 先断言 hook 确实执行并修改了嵌套值
+            self.assertTrue(gov["warned"])
+            self.assertEqual(gov["n"], 2)
+            await entered.wait()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        asyncio.run(_run())
+        # 取消后：嵌套变更被回滚（深拷贝快照）
+        gov = agent._states["t_gov"].metadata["governance"]
+        self.assertEqual(gov["warned"], False)
+        self.assertEqual(gov["n"], 1)
+        # 本轮 user 消息也回滚
+        self.assertEqual([m.content for m in agent._states["t_gov"].messages], [])
+
+    def test_retry_after_failure_adds_exactly_one_turn(self):
+        """故障后重试一次：消息恰好新增一轮，无重复无遗漏。"""
+        import os
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="novamind_atomic3_")
+        db = os.path.join(tmp, "state.sqlite3")
+        store = ConversationStore(db_path=db)
+
+        async def reply_node(s):
+            # 产出非空摘要：_persist_state 才会写 summaries 触发失败触发器
+            return {"messages": [_mkmsg("reply")], "summary": "本轮摘要"}
+
+        agent = NovaMindAgent(conversation_store=store)
+        agent.add_node("agent", reply_node)
+        agent.add_conditional_edge("agent", lambda s: "__end__", {"__end__": "__end__"})
+
+        # 第一次：摘要触发器失败（整批回滚）；随后 drop 触发器重试成功
+        import sqlite3
+        self._install_summary_failure(store)
+        with self.assertRaises(sqlite3.IntegrityError):
+            asyncio.run(agent.run("hi", thread_id="t_retry"))
+        self._drop_summary_failure(store)
+        # 失败轮已回滚：内存无消息、库无消息
+        self.assertEqual([m.content for m in agent._states["t_retry"].messages], [])
+        self.assertEqual(store.load_messages("t_retry"), [])
+        # 重试成功：恰好一轮 user+reply
+        state = asyncio.run(agent.run("hi", thread_id="t_retry"))
+        self.assertEqual([m.content for m in state.messages], ["hi", "reply"])
+        self.assertEqual([m.content for m in store.load_messages("t_retry")],
+                         ["hi", "reply"])
         store.close()
 
 

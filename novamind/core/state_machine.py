@@ -199,6 +199,46 @@ class ConversationStore:
             finally:
                 conn.close()
 
+    def save_turn(
+        self,
+        thread_id: str,
+        messages: list[BaseMessage],
+        *,
+        summary: str | None = None,
+    ) -> None:
+        """消息与摘要同一事务提交（收尾修复 Phase 1）。
+
+        契约：summary=None 表示不更新摘要；字符串（包括空字符串）表示保存
+        该值。允许只更新摘要或只追加消息。任一项失败整批回滚并保留原异常
+        ——一轮消息不会在摘要写入失败后残留。
+        """
+        with self._lock:
+            import sqlite3
+            conn = sqlite3.connect(self._db_path)
+            try:
+                conn.execute("PRAGMA busy_timeout=5000")
+                rows = [self._serialize_message(m) for m in messages]
+                if rows:
+                    conn.executemany(
+                        """INSERT INTO conversations
+                           (thread_id, role, content, message_type, message_id,
+                            tool_calls, tool_call_id, name)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        [(thread_id, *row) for row in rows]
+                    )
+                if summary is not None:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO summaries (thread_id, summary, updated_at)
+                           VALUES (?, ?, CURRENT_TIMESTAMP)""",
+                        (thread_id, summary)
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
     def load_messages(self, thread_id: str) -> list[BaseMessage]:
         """从数据库加载指定会话的完整消息历史（供 Agent 重启恢复，无默认 limit）"""
         import sqlite3
@@ -613,7 +653,12 @@ class NovaMindAgent:
                 break  # 全部是运行中的线程：本轮不淘汰
 
     def _persist_state(self, thread_id: str, state: AgentState) -> None:
-        """将本轮新增消息持久化到数据库（O(1)追加，不全量加载）"""
+        """将本轮新增消息 + 摘要原子持久化（收尾修复 Phase 1）。
+
+        一次 save_turn 提交消息与摘要（同一事务）；只有成功返回后才推进
+        持久化计数并清空 pending。失败时事务回滚，数据库没有半轮残留，
+        调用方负责恢复内存快照。摘要为空保持旧行为（不写库）。
+        """
         if not self._store:
             return
 
@@ -624,14 +669,14 @@ class NovaMindAgent:
             last_count = self._persisted_counts.get(thread_id, 0)
             new_msgs = state.messages[last_count:]
 
+        self._store.save_turn(
+            thread_id,
+            list(new_msgs or []),
+            summary=state.summary or None,
+        )
         if new_msgs:
-            self._store.save_messages(thread_id, new_msgs)
             self._persisted_counts[thread_id] = self._persisted_counts.get(thread_id, 0) + len(new_msgs)
             state.metadata[pending_key] = []
-
-        # 保存摘要（如果有更新）
-        if state.summary:
-            self._store.save_summary(thread_id, state.summary)
 
     def _mark_pending_persist(self, state: AgentState, messages: list[BaseMessage]) -> None:
         """记录本轮需要增量持久化的新消息。"""
