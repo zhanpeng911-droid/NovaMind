@@ -231,7 +231,8 @@ class TestApiSuccessContract(unittest.TestCase):
     def test_sessions_contract(self):
         rec = {"thread_id": "t", "title": "会话", "message_count": 1, "last_ts": "2026-01-01"}
         with patch("novamind.webui.server.get_history_store") as gh:
-            gh.return_value.list_threads.return_value = [rec]
+            # Phase 4：endpoint 改走 list_thread_page 分页 API（形状不变）
+            gh.return_value.list_thread_page.return_value = ([rec], None)
             body = self.client.get("/sessions").json()
         self.assertEqual(set(body.keys()), {"sessions"})
         self.assertEqual(body["sessions"][0]["thread_id"], "t")

@@ -316,10 +316,22 @@ async def list_skills():
 
 @app.get("/sessions")
 async def list_sessions():
-    """列出所有会话（供前端侧边栏）。"""
+    """列出所有会话（供前端侧边栏）。
+
+    Phase 4：走 store 的稳定分页 API（一条 JOIN/页，无 N+1），
+    这里循环取完所有页保持侧边栏完整；响应形状与旧 list_threads 一致。"""
     try:
         store = get_history_store()
-        return {"sessions": store.list_threads()}
+        items: list[dict] = []
+        cursor = None
+        while True:
+            page, cursor = await asyncio.to_thread(
+                store.list_thread_page, 100, cursor
+            )
+            items.extend(page)
+            if cursor is None:
+                break
+        return {"sessions": items}
     except Exception:
         return {"sessions": []}
 
@@ -329,7 +341,7 @@ async def get_history(thread_id: str):
     """返回某会话的消息历史（供前端切换会话时加载）。"""
     try:
         store = get_history_store()
-        msgs = store.load_messages(thread_id)
+        msgs = await asyncio.to_thread(store.load_messages, thread_id)
     except Exception:
         return {"messages": []}
 
@@ -362,7 +374,7 @@ async def delete_session(thread_id: str):
                 # Phase 3：走 Agent 的按 thread 互斥删除（等待在飞轮次结束）
                 await _agent.aclear_conversation(thread_id)
             else:
-                get_history_store().clear_thread(thread_id)
+                await asyncio.to_thread(get_history_store().clear_thread, thread_id)
         return {"status": "ok"}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}

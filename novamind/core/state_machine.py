@@ -87,6 +87,10 @@ class ConversationStore:
         # Windows 下会锁住文件导致临时目录清理失败（WinError 32）。
         conn = sqlite3.connect(self._db_path)
         try:
+            # Phase 4：并发读写保护——WAL 减少读写互斥，busy_timeout 兜底
+            # （Windows/Linux 均适用）；journal_mode 持久化，重复设置幂等。
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS conversations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,44 +112,76 @@ class ConversationStore:
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # 幂等索引：thread 内按 id 的顺序访问（历史加载/分页）都走它
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_conversations_thread_id "
+                "ON conversations(thread_id, id)"
+            )
             conn.commit()
         finally:
             conn.close()
 
+    @staticmethod
+    def _serialize_message(msg: BaseMessage) -> tuple:
+        """消息 → SQLite 行参数（role, content, message_type, message_id,
+        tool_calls_json, tool_call_id, name）。"""
+        role = msg.type if hasattr(msg, "type") else "unknown"
+        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        message_id = getattr(msg, "id", None)
+        name = getattr(msg, "name", None)
+        tool_call_id = getattr(msg, "tool_call_id", None)
+        tool_calls = None
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            tool_calls = json.dumps(msg.tool_calls, ensure_ascii=False)
+        return (role, content, type(msg).__name__,
+                message_id, tool_calls, tool_call_id, name)
+
+    @staticmethod
+    def _row_to_message(row: tuple) -> BaseMessage | None:
+        """SQLite 行（role..name）→ BaseMessage。"""
+        role, content, msg_type, msg_id, tool_calls_json, tool_call_id, name = row
+        msg = None
+        if msg_type == "HumanMessage":
+            msg = HumanMessage(content=content)
+        elif msg_type == "AIMessage":
+            tc = json.loads(tool_calls_json) if tool_calls_json else []
+            msg = AIMessage(content=content, tool_calls=tc)
+        elif msg_type == "ToolMessage":
+            msg = ToolMessage(
+                content=content,
+                tool_call_id=tool_call_id or "",
+                name=name or "",
+            )
+        elif msg_type == "SystemMessage":
+            msg = SystemMessage(content=content)
+        if msg and msg_id:
+            msg.id = msg_id
+        return msg
+
     def save_message(self, thread_id: str, msg: BaseMessage) -> None:
         """保存单条消息到数据库"""
+        self.save_messages(thread_id, [msg])
+
+    def save_messages(self, thread_id: str, messages: list[BaseMessage]) -> None:
+        """批量保存消息（Phase 4：一批一个事务，任一条失败整批回滚）"""
+        if not messages:
+            return
         with self._lock:
             import sqlite3
             conn = sqlite3.connect(self._db_path)
             try:
-                # 序列化消息
-                role = msg.type if hasattr(msg, "type") else "unknown"
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                message_id = getattr(msg, "id", None)
-                name = getattr(msg, "name", None)
-                tool_call_id = getattr(msg, "tool_call_id", None)
-
-                # 序列化tool_calls
-                tool_calls = None
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    tool_calls = json.dumps(msg.tool_calls, ensure_ascii=False)
-
-                conn.execute(
+                conn.execute("PRAGMA busy_timeout=5000")
+                rows = [self._serialize_message(m) for m in messages]
+                conn.executemany(
                     """INSERT INTO conversations
                        (thread_id, role, content, message_type, message_id,
                         tool_calls, tool_call_id, name)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (thread_id, role, content, type(msg).__name__,
-                     message_id, tool_calls, tool_call_id, name)
+                    [(thread_id, *row) for row in rows]
                 )
                 conn.commit()
             finally:
                 conn.close()
-
-    def save_messages(self, thread_id: str, messages: list[BaseMessage]) -> None:
-        """批量保存消息"""
-        for msg in messages:
-            self.save_message(thread_id, msg)
 
     def save_summary(self, thread_id: str, summary: str) -> None:
         """保存/更新对话摘要"""
@@ -163,7 +199,7 @@ class ConversationStore:
                 conn.close()
 
     def load_messages(self, thread_id: str) -> list[BaseMessage]:
-        """从数据库加载指定会话的完整消息历史"""
+        """从数据库加载指定会话的完整消息历史（供 Agent 重启恢复，无默认 limit）"""
         import sqlite3
         with self._lock:
             conn = sqlite3.connect(self._db_path)
@@ -178,31 +214,119 @@ class ConversationStore:
                 )
                 messages = []
                 for row in cursor:
-                    role, content, msg_type, msg_id, tool_calls_json, tool_call_id, name = row
-
-                    msg = None
-                    if msg_type == "HumanMessage":
-                        msg = HumanMessage(content=content)
-                    elif msg_type == "AIMessage":
-                        tc = json.loads(tool_calls_json) if tool_calls_json else []
-                        msg = AIMessage(content=content, tool_calls=tc)
-                    elif msg_type == "ToolMessage":
-                        msg = ToolMessage(
-                            content=content,
-                            tool_call_id=tool_call_id or "",
-                            name=name or "",
-                        )
-                    elif msg_type == "SystemMessage":
-                        msg = SystemMessage(content=content)
-
-                    if msg and msg_id:
-                        msg.id = msg_id
+                    msg = self._row_to_message(row)
                     if msg:
                         messages.append(msg)
-
                 return messages
             finally:
                 conn.close()
+
+    def load_message_page(
+        self,
+        thread_id: str,
+        limit: int = 50,
+        before_id: int | None = None,
+    ) -> tuple[list[BaseMessage], int | None]:
+        """加载一页消息（返回旧→新顺序），用于持续增长数据的稳定分页。
+
+        - SQL 按 id DESC 取 limit + 1 行，返回前反转为旧到新；
+        - 游标是数据库原始行 id（含 tool 行）：下一页条件 id < cursor，
+          因此即使整页都是 tool 行也能推进，不会死循环；
+        - 返回 (messages, next_cursor)；next_cursor=None 表示没有更旧的一页。
+        """
+        import sqlite3
+        limit = max(1, int(limit))
+        with self._lock:
+            conn = sqlite3.connect(self._db_path)
+            try:
+                if before_id is None:
+                    rows = conn.execute(
+                        """SELECT id, role, content, message_type, message_id,
+                                  tool_calls, tool_call_id, name
+                           FROM conversations
+                           WHERE thread_id = ?
+                           ORDER BY id DESC LIMIT ?""",
+                        (thread_id, limit + 1),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """SELECT id, role, content, message_type, message_id,
+                                  tool_calls, tool_call_id, name
+                           FROM conversations
+                           WHERE thread_id = ? AND id < ?
+                           ORDER BY id DESC LIMIT ?""",
+                        (thread_id, before_id, limit + 1),
+                    ).fetchall()
+            finally:
+                conn.close()
+
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        next_cursor = rows[-1][0] if has_more and rows else None
+        rows.reverse()  # 旧 → 新
+        messages = [
+            msg for msg in (self._row_to_message(row[1:]) for row in rows)
+            if msg is not None
+        ]
+        return messages, next_cursor
+
+    def list_thread_page(
+        self,
+        limit: int = 20,
+        cursor: tuple[int, str] | None = None,
+    ) -> tuple[list[dict], tuple[int, str] | None]:
+        """按 (last_id, thread_id) 逆序稳定分页列出会话。
+
+        一条 JOIN 查询同时取 count、last timestamp、last id 与首条 human
+        标题（消除旧 list_threads 的 N+1）；排序不依赖 timestamp，
+        相同时间戳下顺序稳定。cursor=None 从最新一页开始。
+        返回 (items, next_cursor)；next_cursor=None 表示没有更多。
+        """
+        import sqlite3
+        limit = max(1, int(limit))
+        query = """
+            WITH stats AS (
+                SELECT thread_id, COUNT(*) AS cnt,
+                       MAX(id) AS last_id, MAX(timestamp) AS last_ts
+                FROM conversations
+                GROUP BY thread_id
+            )
+            SELECT s.thread_id, s.cnt, s.last_ts, s.last_id,
+                   (SELECT content FROM conversations c
+                    WHERE c.thread_id = s.thread_id AND c.role = 'human'
+                    ORDER BY c.id ASC LIMIT 1) AS first_human
+            FROM stats s
+        """
+        params: list = []
+        if cursor is not None:
+            last_id, thread_id = cursor
+            query += "WHERE (s.last_id < ? OR (s.last_id = ? AND s.thread_id < ?))\n"
+            params.extend([last_id, last_id, thread_id])
+        query += "ORDER BY s.last_id DESC, s.thread_id DESC LIMIT ?"
+        params.append(limit + 1)
+
+        with self._lock:
+            conn = sqlite3.connect(self._db_path)
+            try:
+                rows = conn.execute(query, params).fetchall()
+            finally:
+                conn.close()
+
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        items = []
+        for thread_id, cnt, last_ts, _last_id, first_human in rows:
+            title = (first_human[:24] if first_human else "新对话")
+            items.append({
+                "thread_id": thread_id,
+                "title": title,
+                "message_count": cnt,
+                "last_ts": str(last_ts),
+            })
+        next_cursor = (
+            (rows[-1][3], rows[-1][0]) if has_more and rows else None
+        )
+        return items, next_cursor
 
     def load_summary(self, thread_id: str) -> str:
         """加载指定会话的摘要"""

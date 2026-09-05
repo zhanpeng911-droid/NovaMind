@@ -517,6 +517,165 @@ class TestNovaMindAgent(unittest.TestCase):
         asyncio.run(_test())
 
 
+class TestConversationStoreAtomicBatch(unittest.TestCase):
+    """Phase 4：save_messages 一批一个事务，任一条失败整批回滚。"""
+
+    def _mk_store(self):
+        tmp = tempfile.mkdtemp(prefix="novamind_p4_")
+        return ConversationStore(db_path=os.path.join(tmp, "state.sqlite3"))
+
+    def test_batch_failure_rolls_back_whole_batch(self):
+        store = self._mk_store()
+        ok_msg = AIMessage(content="keep-me", id="m1")
+        store.save_messages("t_batch", [ok_msg])
+        before = store.load_messages("t_batch")
+
+        bad_msg = AIMessage(content="bad", id="m2")
+        bad_msg.tool_calls = [{"name": "x", "args": {"k": object()}}]  # 不可 JSON 序列化
+
+        with self.assertRaises(TypeError):
+            store.save_messages("t_batch", [AIMessage(content="good", id="m3"), bad_msg])
+
+        # 整批回滚：新消息一条都没落
+        self.assertEqual([m.content for m in store.load_messages("t_batch")],
+                         [m.content for m in before])
+
+    def test_batch_success_persists_all_in_one_transaction(self):
+        store = self._mk_store()
+        msgs = [HumanMessage(content=f"m{i}", id=f"id{i}") for i in range(5)]
+        store.save_messages("t_batch2", msgs)
+        loaded = store.load_messages("t_batch2")
+        self.assertEqual([m.content for m in loaded], [f"m{i}" for i in range(5)])
+
+
+class TestConversationStorePagination(unittest.TestCase):
+    """Phase 4：load_message_page / list_thread_page 稳定分页。"""
+
+    def _mk_store(self):
+        tmp = tempfile.mkdtemp(prefix="novamind_p4_")
+        return ConversationStore(db_path=os.path.join(tmp, "state.sqlite3"))
+
+    def test_message_pages_no_dup_no_gap_and_full_restore_matches(self):
+        store = self._mk_store()
+        msgs = ([HumanMessage(content=f"u{i}", id=f"u{i}") for i in range(7)]
+                + [AIMessage(content=f"a{i}", id=f"a{i}") for i in range(5)])
+        store.save_messages("t_page", msgs)
+
+        pages, cursors = [], []
+        cursor = None
+        while True:
+            page, cursor = store.load_message_page("t_page", limit=3, before_id=cursor)
+            pages.append(page)
+            cursors.append(cursor)
+            if cursor is None:
+                break
+        # 分页从最新往回走、页内旧→新：倒序拼接页即完整时间线，无重复无遗漏
+        combined = [m.content for p in reversed(pages) for m in p]
+        self.assertEqual(combined, [m.content for m in msgs])
+        self.assertEqual(len(pages), 4)  # 12 条 / 每页 3 → 4 页
+        self.assertIsNone(cursors[-1])
+        self.assertTrue(all(c is not None for c in cursors[:-1]))
+
+    def test_tool_only_page_cursor_advances(self):
+        store = self._mk_store()
+        msgs = [
+            HumanMessage(content="q", id="q1"),
+            ToolMessage(content="r1", tool_call_id="c1", name="tool", id="t1"),
+            ToolMessage(content="r2", tool_call_id="c2", name="tool", id="t2"),
+            ToolMessage(content="r3", tool_call_id="c3", name="tool", id="t3"),
+            AIMessage(content="done", id="a1"),
+        ]
+        store.save_messages("t_tool", msgs)
+        # 无 cursor 的第一页 = 最新 2 条：[r3, done]
+        page1, cur1 = store.load_message_page("t_tool", limit=2)
+        self.assertEqual([m.content for m in page1], ["r3", "done"])
+        self.assertIsNotNone(cur1)
+        # page2 = [r1, r2]：整页都是 tool 行，游标仍按原始行推进
+        page2, cur2 = store.load_message_page("t_tool", limit=2, before_id=cur1)
+        self.assertEqual([m.content for m in page2], ["r1", "r2"])
+        self.assertIsNotNone(cur2)
+        page3, cur3 = store.load_message_page("t_tool", limit=2, before_id=cur2)
+        self.assertEqual([m.content for m in page3], ["q"])
+        self.assertIsNone(cur3)
+
+    def test_load_messages_full_restore_unchanged(self):
+        store = self._mk_store()
+        msgs = [HumanMessage(content="h", id="h1"),
+                AIMessage(content="a", id="a1"),
+                ToolMessage(content="t", tool_call_id="c", name="tool", id="t1")]
+        store.save_messages("t_full", msgs)
+        loaded = store.load_messages("t_full")
+        self.assertEqual([m.content for m in loaded], ["h", "a", "t"])
+
+    def test_list_thread_page_stable_order_and_title(self):
+        store = self._mk_store()
+        # 故意交错插入；同一时间戳下顺序仍需稳定（按 last_id 逆序）
+        store.save_messages("t_a", [HumanMessage(content="alpha conversation", id="a1"),
+                                    AIMessage(content="more", id="a2")])
+        store.save_messages("t_b", [HumanMessage(content="beta", id="b1")])
+        store.save_messages("t_c", [AIMessage(content="no human title", id="c1")])
+
+        items, cursor = store.list_thread_page(limit=2)
+        self.assertEqual([i["thread_id"] for i in items], ["t_c", "t_b"])
+        # t_a 存 2 行、t_b 存 1 行、t_c 存 1 行 → t_b 的 last_id = 3
+        self.assertEqual(cursor, (3, "t_b"))
+        items2, cursor2 = store.list_thread_page(limit=2, cursor=cursor)
+        self.assertEqual([i["thread_id"] for i in items2], ["t_a"])
+        self.assertIsNone(cursor2)
+        # 标题语义：首条 human 消息；无 human 时回退 "新对话"
+        titles = {i["thread_id"]: i["title"] for i in items + items2}
+        self.assertEqual(titles["t_a"], "alpha conversation")
+        self.assertEqual(titles["t_b"], "beta")
+        self.assertEqual(titles["t_c"], "新对话")
+        # count 与旧语义一致
+        counts = {i["thread_id"]: i["message_count"] for i in items + items2}
+        self.assertEqual(counts, {"t_a": 2, "t_b": 1, "t_c": 1})
+
+    def test_list_thread_page_cursor_tiebreak_same_last_id(self):
+        """两个 thread 的 last_id 相同（不可能同时成立）——这里验证
+        相同 timestamp 下顺序稳定：全部行同一时间戳，分页两次结果一致。"""
+        store = self._mk_store()
+        for tid in ("t1", "t2", "t3"):
+            store.save_messages(tid, [HumanMessage(content=f"hi {tid}", id=f"{tid}-1")])
+        page1, cur = store.list_thread_page(limit=2)
+        page2, _ = store.list_thread_page(limit=2, cursor=cur)
+        again1, cur1b = store.list_thread_page(limit=2)
+        again2, _ = store.list_thread_page(limit=2, cursor=cur1b)
+        self.assertEqual([i["thread_id"] for i in page1 + page2],
+                         [i["thread_id"] for i in again1 + again2])
+
+    def test_concurrent_read_write_no_locked_errors(self):
+        """Windows/Linux 并发读写 smoke：WAL + busy_timeout 下不抛 locked。"""
+        import asyncio
+
+        store = self._mk_store()
+        errors = []
+
+        def writer(i):
+            for j in range(5):
+                store.save_message(f"t_w{i}", HumanMessage(content=f"w{i}-{j}"))
+
+        def reader():
+            for _ in range(20):
+                store.load_messages("t_w0")
+                store.list_thread_page(limit=10)
+
+        async def _run():
+            def safe(fn, *args):
+                try:
+                    fn(*args)
+                except Exception as exc:  # pragma: no cover
+                    errors.append(exc)
+            await asyncio.gather(
+                *[asyncio.to_thread(safe, writer, i) for i in range(3)],
+                asyncio.to_thread(safe, reader),
+            )
+
+        asyncio.run(_run())
+        total = sum(len(store.load_messages(f"t_w{i}")) for i in range(3))
+        self.assertEqual(total, 15)
+
+
 if __name__ == "__main__":
     unittest.main()
 
