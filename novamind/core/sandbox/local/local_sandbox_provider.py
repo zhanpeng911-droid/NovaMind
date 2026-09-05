@@ -29,6 +29,13 @@ _DEFAULT_LRU_SIZE = 256
 NOVAMIND_SHELL_WHITELIST = {"pwd", "echo", "ls", "dir", "cat", "type", "mkdir"}
 
 
+class _DefaultCommandWhitelist:
+    """Sentinel that distinguishes an omitted whitelist from an explicit None override."""
+
+
+_DEFAULT_COMMAND_WHITELIST = _DefaultCommandWhitelist()
+
+
 def default_office_path_mappings() -> list[PathMapping]:
     """默认 office 工位映射：虚拟 /mnt/novamind/user_data → OFFICE_DIR。"""
     from ...config import OFFICE_DIR
@@ -53,12 +60,16 @@ class LocalSandboxProvider(SandboxProvider):
         path_mappings: list[PathMapping] | None = None,
         lru_size: int = _DEFAULT_LRU_SIZE,
         *,
-        command_whitelist: set[str] | None = None,
+        command_whitelist: set[str] | None | _DefaultCommandWhitelist = _DEFAULT_COMMAND_WHITELIST,
         allow_host_bash: bool = True,
     ) -> None:
         self._path_mappings = path_mappings if path_mappings is not None else default_office_path_mappings()
         self._lru_size = lru_size
-        self._command_whitelist = command_whitelist
+        self._command_whitelist: set[str] | None = (
+            NOVAMIND_SHELL_WHITELIST
+            if isinstance(command_whitelist, _DefaultCommandWhitelist)
+            else command_whitelist
+        )
         self._allow_host_bash = allow_host_bash
         self._sandboxes: OrderedDict[str, Sandbox] = OrderedDict()
         self._lock = threading.Lock()

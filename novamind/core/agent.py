@@ -29,6 +29,7 @@ from .context import ContextManager
 from .plugin_loader import load_dynamic_skills
 from .mcp_adapter import load_mcp_tools
 from .config import DB_PATH
+from .llm import ModelRouter, ProviderConfigError
 from .policy import HarnessPolicy
 import os
 
@@ -107,6 +108,16 @@ def _merge_hook_state_patch(state_updates: dict, state_patch: dict) -> None:
             state_updates[k] = v
 
 
+def _default_model_router() -> ModelRouter | None:
+    """返回可提供实际后备链的默认路由器；单一 provider 保持旧工厂路径。"""
+    try:
+        router = ModelRouter()
+        return router if len(router.chain_names("researcher")) > 1 else None
+    except ProviderConfigError:
+        # 没有按角色可路由的 provider 时，沿用既有单 provider 配置。
+        return None
+
+
 def create_agent_app(
     provider_name: str | None = None,
     model_name: str | None = None,
@@ -123,14 +134,17 @@ def create_agent_app(
     这是核心组装函数，将所有组件串联成完整的智能体循环。
 
     Args:
-        provider_name: LLM提供商名称
-        model_name: 模型标识符
+        provider_name: LLM提供商名称。仅在路由链不可用时决定旧工厂的单 provider 模型；
+            CLI/GUI 传入的 DEFAULT_PROVIDER 不会禁用已配置的后备链。
+        model_name: 模型标识符。仅在路由链不可用时决定旧工厂的单 provider 模型；
+            CLI/GUI 传入的 DEFAULT_MODEL 不会禁用已配置的后备链。
         tools: 自定义工具列表（None则使用内置+动态插件+MCP+多Agent委派，pi 可用时）
         checkpointer: 保留兼容性参数（不再使用）
         token_tracker: Token追踪器实例
         audit_logger: 审计日志器实例
         middlewares: 横切中间件列表（None则使用默认空管道，保持向后兼容）
-        model_router: 可选 ModelRouter（提供则走 FallbackChatModel 链式降级）
+        model_router: 可选 ModelRouter（显式提供时优先使用）。未提供时，若环境发现至少两个
+            可路由 provider，则自动构造 FallbackChatModel；否则使用旧 provider 工厂。
 
     Returns:
         NovaMindAgent 实例
@@ -164,7 +178,11 @@ def create_agent_app(
     ):
         _middleware_manager.add(OrchestrationMiddleware())
 
-    # 创建LLM实例（model_router 提供时走链式降级，否则走旧工厂保持兼容）
+    # 创建LLM实例：调用方注入优先；否则在环境配置形成后备链时启用路由。
+    # CLI/GUI 虽会传入 DEFAULT_PROVIDER/MODEL，但它们不应关闭已配置的后备链；
+    # 单一 provider（以及旧配置）仍走旧工厂，保持兼容。
+    if model_router is None:
+        model_router = _default_model_router()
     if model_router is not None:
         llm = model_router.build_model("researcher")
     else:

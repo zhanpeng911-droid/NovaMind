@@ -36,10 +36,10 @@
 - A2：FakeLLM 脚本 10 轮 `agent→tools→agent` 后收敛；死循环在 max_iterations 终止并写 `system_action` 审计。
 - A3：录制中间件五钩子均触发且先 before 后 after；加中间件后默认行为不变。
 - A5（mock 机制层）：MemoryWorker 抽取→落库→阈值合并 semantic→源标 forgotten→retriever 过滤 全通。
-  **[WIRING] 事实核查输出**：默认 `create_agent_app` 不含 MemoryRecall/MemoryConsolidation/ContextGovernance 中间件 → 默认 CLI/GUI 运行时 L4/L5 未接线（缺陷#2）。
+  **[WIRING] 边界核查输出**：裸 `create_agent_app` 不含 MemoryRecall/MemoryConsolidation/ContextGovernance 中间件。这是内核保持显式装配的边界，不能再据此判定默认 CLI/GUI 未接线：当前 CLI 与 WebUI 均显式传入默认中间件栈（缺陷#2 的修复记录见第七节）。
 - A13：到期任务注入事件总线；repeat_count 递减。
 
-## 三、Part B 细节（真实 LLM，DeepSeek；18 passed + 1 xfailed，总耗时 ~2 分钟/轮，花费极低）
+## 三、Part B 细节（真实 LLM，DeepSeek；初次验收为 18 passed + 1 xfailed；缺陷#1 修复后 B10 已复验为 PASS，见第七节）
 
 | 用例 | 结果 | 关键证据 |
 |---|---|---|
@@ -71,8 +71,8 @@
 
 | # | 严重级 | 功能 | 现象 | 归属 | 复现/证据 |
 |---|---|---|---|---|---|
-| 1 | 高 | L4 记忆召回 | 启动后 encode 的记忆**永远检索不到**（连精确词 0 命中） | 框架缺陷 | `build_default_provider` 未对 store 做 `_wrap_store` 接线（bootstrap 有、strategy 缺）；B10 xfail 佐证 |
-| 2 | 中 | L4/L5 + 上下文治理默认激活 | 默认 CLI/GUI 运行时**未接线**这些中间件（README 宣称的“五层记忆/上下文治理”默认不生效） | 未接线 | create_agent_app middlewares 默认空；main/server 未传；[WIRING] 输出 |
+| 1 | 高（已修复） | L4 记忆召回 | **修复前**：启动后 encode 的记忆永远检索不到（连精确词 0 命中） | 框架缺陷 | **修复前**：`build_default_provider` 未对 store 做 `_wrap_store` 接线，B10 xfail 佐证；当前修复与回归证据见第七节 |
+| 2 | 中（已修复） | L4/L5 + 上下文治理默认激活 | **修复前**：默认 CLI/GUI 运行时未接线这些中间件（README 宣称的“五层记忆/上下文治理”默认不生效） | 未接线 | **修复前**：[WIRING] 将裸 `create_agent_app` 的默认空中间件误外推到 CLI/GUI；当前 CLI/WebUI 接线与回归记录见第七节 |
 | 3 | 低 | C1 Docker 验收 | docker CLI 在、**daemon 未启动** | 环境 | `docker ps` npipe 连接失败 |
 | 4 | 信息 | WSL2 路径翻译 | executor 默认关闭，需 `NOVAMIND_SANDBOX_EXECUTOR=wsl` 显式开启 | 配置依赖/文档 | 纯函数恒生效，包装器默认直传 |
 | 5 | 信息 | L5 抽取类型 | 真实 LLM 自判类型（DeepSeek 把偏好归 semantic 非 episodic） | 设计留观 | B4 实测 |
@@ -81,7 +81,7 @@
 
 ```bash
 uv run --no-sync pytest tests/functional -q          # 全功能验收（Part A/B/C）
-# 已知项：B10 xfail（缺陷#1）、C1 FAIL（需 docker daemon 启动后复跑）、C4 需装 mcp
+# 当前已知项：C1 FAIL（需 docker daemon 启动后复跑）、C4 需装 mcp；B10 已转 PASS（缺陷#1 已修复）
 ```
 
 CI 已 `--ignore=tests/functional`：功能验收属发布前手工门禁，不占日常回归。

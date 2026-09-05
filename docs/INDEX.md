@@ -9,6 +9,7 @@ Start here, then drill down by topic:
 - tool-contracts.md: builtin tool inventory and intended use boundaries.
 - session-model.md: thread isolation, persistence, and context lifecycle.
 - playbooks/file-edit.md: file-edit workflow inside the sandbox.
+- NEXT_HARDENING_IMPLEMENTATION_PLAN.md: executable plan for wiring the sandbox into the default tool path and hardening WebUI concurrency, lifecycle, pagination, and API boundaries.
 
 Rules for agents:
 

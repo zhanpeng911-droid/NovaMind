@@ -16,6 +16,7 @@ from novamind.webui.server import (
     _safe_id,
     _sse,
     _stream_chat,
+    delete_session,
     doctor,
     list_skills,
     monitor_events,
@@ -137,6 +138,58 @@ class TestStreamChat(unittest.TestCase):
         types = [p["type"] for p in payloads]
         self.assertIn("error", types)
         self.assertEqual(types[-1], "done")
+
+
+class _BlockingPersistingAgent:
+    """模拟流式收尾才落盘、且缓存会话状态的运行中 Agent。"""
+
+    def __init__(self, store):
+        self.store = store
+        self._states = {"t1": object()}
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def astream(self, _message, thread_id=None):
+        self.started.set()
+        await self.release.wait()
+        self.store.save_message(thread_id, AIMessage(content="late response"))
+        yield {"agent": {"messages": [AIMessage(content="late response")]}}
+
+    def clear_conversation(self, thread_id):
+        self._states.pop(thread_id, None)
+        self.store.clear_thread(thread_id)
+
+
+class TestSessionDeletionConsistency(unittest.TestCase):
+    def test_delete_waits_for_active_chat_then_clears_agent_cache_and_history(self):
+        """删除与流式收尾竞态时，不能让旧会话重新写回 SQLite。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConversationStore(db_path=os.path.join(tmp, "state.sqlite3"))
+            self.addCleanup(store.close)
+            store.save_message("t1", HumanMessage(content="existing message"))
+            agent = _BlockingPersistingAgent(store)
+
+            async def exercise():
+                async def consume_stream():
+                    async for _ in _stream_chat(ChatRequest(message="continue", thread_id="t1")):
+                        pass
+
+                stream_task = asyncio.create_task(consume_stream())
+                await agent.started.wait()
+                delete_task = asyncio.create_task(delete_session("t1"))
+                await asyncio.sleep(0)
+                agent.release.set()
+                await stream_task
+                return await delete_task
+
+            with mock.patch("novamind.webui.server._agent", agent), mock.patch(
+                "novamind.webui.server._history_store", store
+            ):
+                response = asyncio.run(exercise())
+
+            self.assertEqual(response, {"status": "ok"})
+            self.assertNotIn("t1", agent._states)
+            self.assertEqual(store.load_messages("t1"), [])
 
 
 class TestListThreads(unittest.TestCase):

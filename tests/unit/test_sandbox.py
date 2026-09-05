@@ -159,6 +159,33 @@ class TestLocalSandboxProvider(unittest.TestCase):
         sb.write_file(f"{VIRTUAL}/x.txt", "data")
         self.assertEqual(sb.read_file(f"{VIRTUAL}/x.txt"), "data")
 
+    def test_default_provider_rejects_command_outside_whitelist(self):
+        sid = self.provider.acquire(thread_id="t1")
+        sandbox = self.provider.get(sid)
+        self.assertIsNotNone(sandbox)
+        with self.assertRaises(SandboxPermissionError):
+            sandbox.execute_command("python --version")
+
+    def test_explicit_none_disables_default_command_whitelist(self):
+        provider = LocalSandboxProvider(
+            path_mappings=[PathMapping(VIRTUAL, self.tmp.name)],
+            command_whitelist=None,
+        )
+        sid = provider.acquire(thread_id="t1")
+        sandbox = provider.get(sid)
+        self.assertIsNotNone(sandbox)
+        sandbox.execute_command("python --version")
+
+    def test_explicit_command_whitelist_overrides_default(self):
+        provider = LocalSandboxProvider(
+            path_mappings=[PathMapping(VIRTUAL, self.tmp.name)],
+            command_whitelist={"python"},
+        )
+        sid = provider.acquire(thread_id="t1")
+        sandbox = provider.get(sid)
+        self.assertIsNotNone(sandbox)
+        sandbox.execute_command("python --version")
+
 
 class TestDockerPathGuard(unittest.TestCase):
     def test_write_under_mount_ok(self):

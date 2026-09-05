@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
 from novamind.core.agent import _extract_token_counts
+from novamind.core.llm.model_router import ModelRouter
+from novamind.core.llm.provider_config import ProviderConfig, ProviderConfigError
 from novamind.core.state_machine import AgentState
 from novamind.core.context import ContextManager
 from novamind.core.policy import HarnessPolicy
@@ -50,6 +52,132 @@ class TestAgentTokenExtraction(unittest.TestCase):
 
     def test_returns_none_without_usage(self):
         self.assertIsNone(_extract_token_counts(FakeResponse()))
+
+
+class TestAgentModelRouting(unittest.TestCase):
+    """默认运行时在存在后备链时应启用 ModelRouter。"""
+
+    @staticmethod
+    def _provider(name: str, *, default: bool = False) -> ProviderConfig:
+        return ProviderConfig(
+            provider=name,
+            model=f"{name}-model",
+            api_key=f"{name}-key",
+            base_url=None,
+            priority=10,
+            default=default,
+            enabled=True,
+        )
+
+    def test_default_runtime_uses_fallback_router_when_multiple_providers_available(self):
+        """默认装配应把瞬时失败从主模型切换到后备模型。"""
+        primary = FakeLLM()
+        primary.invoke = MagicMock(side_effect=ConnectionError("primary unavailable"))
+        fallback = FakeLLM(responses=[AIMessage(content="fallback response")])
+        router = ModelRouter(providers=[
+            self._provider("qwen"),
+            self._provider("openai", default=True),
+        ])
+
+        def build_model(config):
+            return {"qwen": primary, "openai": fallback}[config.provider]
+
+        with patch("novamind.core.agent.ModelRouter", return_value=router), \
+                patch("novamind.core.llm.model_router.build_chat_model", side_effect=build_model), \
+                patch("novamind.core.agent.get_provider") as legacy_factory, \
+                patch("novamind.core.agent.load_dynamic_skills", return_value=[]), \
+                patch("novamind.core.agent.load_mcp_tools", return_value=[]):
+            from novamind.core.agent import create_agent_app
+
+            # CLI/GUI 会显式传入 DEFAULT_PROVIDER / DEFAULT_MODEL；此时仍应保留降级链。
+            agent = create_agent_app(
+                provider_name="openai",
+                model_name="gpt-4o-mini",
+                audit_logger=FakeAuditLogger(),
+                tools=[],
+            )
+            state = asyncio.run(agent.run("hello", thread_id="router_default"))
+            agent.clear_conversation("router_default")
+
+        legacy_factory.assert_not_called()
+        self.assertEqual(state.messages[-1].content, "fallback response")
+        self.assertEqual(primary.invoke.call_count, 1)
+        self.assertEqual(fallback.call_count, 1)
+
+    def test_caller_injected_router_remains_the_model_source(self):
+        """显式注入 router 时不应创建或覆盖为默认 router。"""
+        llm = FakeLLM(responses=[AIMessage(content="injected response")])
+        router = MagicMock()
+        router.build_model.return_value = llm
+
+        with patch("novamind.core.agent.ModelRouter") as default_router, \
+                patch("novamind.core.agent.load_dynamic_skills", return_value=[]), \
+                patch("novamind.core.agent.load_mcp_tools", return_value=[]):
+            from novamind.core.agent import create_agent_app
+
+            agent = create_agent_app(
+                audit_logger=FakeAuditLogger(),
+                tools=[],
+                model_router=router,
+            )
+            state = asyncio.run(agent.run("hello", thread_id="router_injected"))
+            agent.clear_conversation("router_injected")
+
+        router.build_model.assert_called_once_with("researcher")
+        default_router.assert_not_called()
+        self.assertEqual(state.messages[-1].content, "injected response")
+
+    def test_single_provider_configuration_keeps_legacy_factory_for_test_fakes(self):
+        """没有后备项时，默认装配保持单 provider 与现有 fake 注入方式。"""
+        router = MagicMock()
+        router.chain_names.return_value = ["openai"]
+        llm = FakeLLM(responses=[AIMessage(content="single-provider response")])
+
+        with patch("novamind.core.agent.ModelRouter", return_value=router), \
+                patch("novamind.core.agent.get_provider", return_value=llm) as get_provider, \
+                patch("novamind.core.agent.load_dynamic_skills", return_value=[]), \
+                patch("novamind.core.agent.load_mcp_tools", return_value=[]):
+            from novamind.core.agent import create_agent_app
+
+            agent = create_agent_app(
+                provider_name="single-provider",
+                model_name="single-model",
+                audit_logger=FakeAuditLogger(),
+                tools=[],
+            )
+            state = asyncio.run(agent.run("hello", thread_id="router_single"))
+            agent.clear_conversation("router_single")
+
+        router.build_model.assert_not_called()
+        get_provider.assert_called_once_with(
+            provider_name="single-provider",
+            model_name="single-model",
+        )
+        self.assertEqual(state.messages[-1].content, "single-provider response")
+
+    def test_unroutable_default_configuration_falls_back_to_legacy_factory(self):
+        """自动路由无法建立链时应回退既有 provider factory。"""
+        llm = FakeLLM(responses=[AIMessage(content="legacy fallback response")])
+
+        with patch(
+            "novamind.core.agent.ModelRouter",
+            side_effect=ProviderConfigError("no available provider"),
+        ), patch("novamind.core.agent.get_provider", return_value=llm) as get_provider, \
+                patch("novamind.core.agent.load_dynamic_skills", return_value=[]), \
+                patch("novamind.core.agent.load_mcp_tools", return_value=[]):
+            from novamind.core.agent import create_agent_app
+
+            agent = create_agent_app(
+                provider_name=None,
+                model_name=None,
+                audit_logger=FakeAuditLogger(),
+                tools=[],
+            )
+            state = asyncio.run(agent.run("hello", thread_id="router_unroutable"))
+            agent.clear_conversation("router_unroutable")
+
+        get_provider.assert_called_once()
+        self.assertEqual(state.messages[-1].content, "legacy fallback response")
 
 
 class TestAsyncBlockingIsolation(unittest.TestCase):

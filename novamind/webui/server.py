@@ -340,7 +340,12 @@ async def get_history(thread_id: str):
 async def delete_session(thread_id: str):
     """删除指定会话（前端侧边栏删除按钮）。"""
     try:
-        get_history_store().clear_thread(thread_id)
+        # 与流式对话共用锁：避免正在结束的 Agent 在删除后把旧状态重新落盘。
+        async with _chat_lock:
+            if _agent is not None:
+                _agent.clear_conversation(thread_id)
+            else:
+                get_history_store().clear_thread(thread_id)
         return {"status": "ok"}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
