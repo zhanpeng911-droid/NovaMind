@@ -440,6 +440,19 @@
   }
   #send:hover { filter: brightness(1.1); }
   #send:disabled { background: var(--surface-2); color: var(--faint); cursor: not-allowed; }
+  #stop {
+    background: var(--surface-2); color: var(--text);
+    border: 1px solid var(--border); padding: 0 16px; height: 40px;
+    font-family: var(--mono); font-size: 12px; font-weight: 600; letter-spacing: 1px;
+    cursor: pointer; transition: filter 0.15s;
+  }
+  #stop:hover { filter: brightness(1.15); }
+  #stop:disabled { color: var(--faint); cursor: not-allowed; }
+  .load-more, .load-earlier {
+    font-family: var(--mono); font-size: 11px; color: var(--teal);
+    cursor: pointer; padding: 8px 12px; text-align: center;
+  }
+  .load-more:hover, .load-earlier:hover { text-decoration: underline; }
   footer .hint { font-family: var(--mono); font-size: 10px; color: var(--faint); }
 </style>
 </head>
@@ -473,6 +486,7 @@
     <span class="prompt">❯</span>
     <textarea id="input" placeholder="输入任务... (Enter 发送 · Shift+Enter 换行)" rows="1"></textarea>
     <span class="hint">ENTER ↵</span>
+    <button id="stop" disabled>STOP</button>
     <button id="send">SEND</button>
   </footer>
 
@@ -538,11 +552,63 @@
   });
 
 
-  let sessions = [];
+  // ── Phase 6：按会话隔离状态 ──
+  // 每个会话独立持有 {messages, running, abortController, requestToken}，
+  // 不再依赖全局 running/currentMessages：A 会话的流只写 A 的状态。
+  let sessions = [];            // 侧边栏列表（含未发送的 draft）
   let currentId = null;
-  let currentMessages = [];
-  let running = false;
   let currentView = 'chat';
+  let sessionsLoaded = false;   // 首次加载后才做 last-thread 恢复
+
+  const sessionStates = new Map();
+  function sessionState(id) {
+    if (!sessionStates.has(id)) {
+      sessionStates.set(id, {
+        messages: [], running: false, abortController: null, requestToken: 0,
+        historyCursor: null, historyHasMore: false, historyLoaded: false,
+      });
+    }
+    return sessionStates.get(id);
+  }
+
+  // 各列表的分页游标与 has_more（sessions / history / monitor / skills）
+  const pageState = {
+    sessions: { cursor: null, hasMore: false },
+    monitorSessions: { cursor: null, hasMore: false },
+    monitorEvents: { cursor: null, hasMore: false },
+    skills: { cursor: null, hasMore: false, count: 0 },
+  };
+  let requestCounter = 0;
+
+  async function fetchJson(url, options) {
+    // 统一错误处理：检查 resp.ok；解析 error.message（兼容 error?.message /
+    // message）；非 JSON 错误显示稳定通用文案。
+    let resp;
+    try {
+      resp = await fetch(url, options);
+    } catch (e) {
+      throw new Error('网络连接失败，请检查后端是否运行');
+    }
+    const text = await resp.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+    if (!resp.ok) {
+      const msg = (data && data.error && data.error.message)
+        || (data && data.message)
+        || ('请求失败 (HTTP ' + resp.status + ')');
+      const err = new Error(msg);
+      err.status = resp.status;
+      throw err;
+    }
+    if (data === null) throw new Error('服务端返回了无效数据');
+    return data;
+  }
+
+  function flashStatus(text) {
+    statusText.textContent = text;
+    statusEl.className = 'status running';
+    setTimeout(refreshRunUI, 3000);
+  }
 
   function escapeHtml(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -592,20 +658,41 @@
     if (view === 'monitor') loadMonitor();
     else if (view === 'doctor') loadDoctor();
     else if (view === 'skills') loadSkills();
-    else input.focus();
+    else { refreshRunUI(); input.focus(); }
   }
 
-  async function loadSessions() {
+  async function loadSessions(reset = true) {
+    if (reset) {
+      pageState.sessions.cursor = null;
+      pageState.sessions.hasMore = false;
+    }
     try {
-      const resp = await fetch('/sessions');
-      const data = await resp.json();
-      sessions = (data.sessions || []).map(s => ({
+      let url = '/sessions?limit=100';
+      if (pageState.sessions.cursor) url += '&cursor=' + encodeURIComponent(pageState.sessions.cursor);
+      const data = await fetchJson(url);
+      const items = (data.sessions || []).map(s => ({
         id: s.thread_id, threadId: s.thread_id, title: s.title, isDraft: false,
       }));
-    } catch (e) { sessions = []; }
-    const last = localStorage.getItem('novamind_last_thread');
-    if (last && sessions.some(s => s.id === last)) await switchTo(last);
-    else newChat();
+      pageState.sessions.cursor = (data.pagination && data.pagination.next_cursor) || null;
+      pageState.sessions.hasMore = !!(data.pagination && data.pagination.has_more);
+      if (reset) {
+        // 保留草稿（尚未发送第一条消息的会话只存在于前端）
+        const drafts = sessions.filter(x => x.isDraft);
+        const known = new Set(items.map(x => x.id));
+        sessions = drafts.filter(x => !known.has(x.id)).concat(items);
+        const last = localStorage.getItem('novamind_last_thread');
+        if (!sessionsLoaded && last && sessions.some(s => s.id === last)) await switchTo(last);
+        else if (!sessionsLoaded) newChat();
+        sessionsLoaded = true;
+      } else {
+        const known = new Set(sessions.map(x => x.id));
+        items.forEach(it => { if (!known.has(it.id)) sessions.push(it); });
+      }
+    } catch (e) {
+      if (reset) sessions = sessions.filter(x => x.isDraft);
+      if (!sessionsLoaded) { sessionsLoaded = true; newChat(); }
+    }
+    renderSessions();
   }
 
   function currentSession() { return sessions.find(s => s.id === currentId); }
@@ -614,9 +701,9 @@
     const draft = { id: 'draft_' + Date.now(), threadId: null, title: '新会话', isDraft: true };
     sessions.unshift(draft);
     currentId = draft.id;
-    currentMessages = [];
     renderSessions();
     renderMessages();
+    refreshRunUI();
     input.focus();
   }
   async function switchTo(id) {
@@ -624,26 +711,37 @@
     currentId = id;
     const s = currentSession();
     if (!s) return;
-    if (s.isDraft) {
-      currentMessages = [];
-    } else {
+    const st = sessionState(id);
+    if (!s.isDraft && !st.historyLoaded) {
       try {
-        const resp = await fetch('/history/' + encodeURIComponent(s.threadId));
-        const data = await resp.json();
-        currentMessages = data.messages || [];
-      } catch (e) { currentMessages = []; }
+        const data = await fetchJson('/history/' + encodeURIComponent(s.threadId) + '?limit=100');
+        st.messages = data.messages || [];
+        st.historyCursor = (data.pagination && data.pagination.next_cursor) || null;
+        st.historyHasMore = !!(data.pagination && data.pagination.has_more);
+        st.historyLoaded = true;
+      } catch (e) { st.messages = []; }
     }
     localStorage.setItem('novamind_last_thread', s.isDraft ? '' : s.threadId);
     renderSessions();
     renderMessages();
+    refreshRunUI();
     input.focus();
   }
   async function deleteSession(id, e) {
     e.stopPropagation();
     const s = sessions.find(x => x.id === id);
     if (s && !s.isDraft) {
-      try { await fetch('/sessions/' + encodeURIComponent(s.threadId), { method: 'DELETE' }); } catch (err) {}
+      const st = sessionStates.get(id);
+      // 删除运行中的会话：先 abort 本轮（服务端取消并回滚），再调 DELETE
+      if (st && st.running && st.abortController) st.abortController.abort();
+      try {
+        await fetchJson('/sessions/' + encodeURIComponent(s.threadId), { method: 'DELETE' });
+      } catch (err) {
+        flashStatus('删除失败：' + err.message);
+        return;  // 删除失败不做乐观移除，会话保留
+      }
     }
+    sessionStates.delete(id);
     sessions = sessions.filter(x => x.id !== id);
     if (currentId === id) {
       if (sessions.length) await switchTo(sessions[0].id);
@@ -653,11 +751,12 @@
   function renderSessions() {
     sessionsEl.innerHTML = '';
     sessions.forEach(s => {
+      const st = sessionStates.get(s.id);
       const el = document.createElement('div');
       el.className = 'session' + (s.id === currentId ? ' active' : '');
       const title = document.createElement('span');
       title.className = 'title';
-      title.textContent = s.title;
+      title.textContent = (st && st.running ? '● ' : '') + s.title;
       const del = document.createElement('span');
       del.className = 'del';
       del.textContent = '✕';
@@ -667,6 +766,13 @@
       el.addEventListener('click', () => switchTo(s.id));
       sessionsEl.appendChild(el);
     });
+    if (pageState.sessions.hasMore) {
+      const more = document.createElement('div');
+      more.className = 'load-more';
+      more.textContent = '加载更多…';
+      more.addEventListener('click', ev => { ev.stopPropagation(); loadSessions(false); });
+      sessionsEl.appendChild(more);
+    }
   }
 
   function fallbackCopy(text) {
@@ -706,16 +812,27 @@
     msgEl.appendChild(btn);
   }
 
-  function renderMessages() {
+  function renderMessages(opts) {
+    const preserveScroll = opts && opts.preserveScroll;
+    const prevHeight = messagesEl.scrollHeight;
+    const prevTop = messagesEl.scrollTop;
     messagesEl.innerHTML = '';
-    if (!currentMessages.length) {
+    const st = currentId ? sessionState(currentId) : null;
+    if (!st || !st.messages.length) {
       const hint = document.createElement('div');
       hint.className = 'empty-hint';
       hint.innerHTML = '<div class="big">NOVA_MIND</div>可审计的深度研究 Agent 内核<br><span class="mono">在下方输入任务，开始你的第一条指令</span>';
       messagesEl.appendChild(hint);
       return;
     }
-    currentMessages.forEach(m => {
+    if (st.historyHasMore) {
+      const earlier = document.createElement('div');
+      earlier.className = 'load-earlier';
+      earlier.textContent = '加载更早的消息…';
+      earlier.addEventListener('click', loadEarlierMessages);
+      messagesEl.appendChild(earlier);
+    }
+    st.messages.forEach(m => {
       const el = document.createElement('div');
       el.className = 'msg ' + (m.role === 'user' ? 'user' : 'ai');
       if (m.role === 'ai' && m.tools && m.tools.length) {
@@ -732,47 +849,105 @@
       if (m.role === 'ai') addCopyBtn(el, () => m.content || '');
       messagesEl.appendChild(el);
     });
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (preserveScroll) {
+      // prepend 后保持视口位置（跳变补偿）
+      messagesEl.scrollTop = messagesEl.scrollHeight - prevHeight + prevTop;
+    } else {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
   }
 
-  function setStatus(run, text) {
-    running = run;
-    statusText.textContent = text || (run ? 'RUNNING' : 'STANDBY');
+  async function loadEarlierMessages() {
+    const s = currentSession();
+    if (!s || s.isDraft) return;
+    const st = sessionState(currentId);
+    if (!st.historyCursor) return;
+    try {
+      const data = await fetchJson('/history/' + encodeURIComponent(s.threadId)
+        + '?limit=100&cursor=' + encodeURIComponent(st.historyCursor));
+      st.messages = (data.messages || []).concat(st.messages);
+      st.historyCursor = (data.pagination && data.pagination.next_cursor) || null;
+      st.historyHasMore = !!(data.pagination && data.pagination.has_more);
+      renderMessages({ preserveScroll: true });
+    } catch (e) {
+      flashStatus('加载更早消息失败：' + e.message);
+    }
+  }
+
+  function refreshRunUI() {
+    // 按当前会话的 running 状态驱动状态栏/按钮（其他会话不受影响）
+    const st = currentId ? sessionStates.get(currentId) : null;
+    const run = !!(st && st.running);
+    statusText.textContent = run ? 'RUNNING' : 'STANDBY';
     statusEl.className = 'status ' + (run ? 'running' : 'idle');
     sendBtn.disabled = run;
+    stopBtn.disabled = !run;
+  }
+
+  function stopCurrent() {
+    const st = currentId ? sessionStates.get(currentId) : null;
+    if (st && st.running && st.abortController) st.abortController.abort();
   }
 
   async function send() {
     const text = input.value.trim();
-    if (!text || running || !currentId) return;
+    if (!text || !currentId) return;
+    const s = currentSession();
+    if (!s) return;
+    const st = sessionState(currentId);
+    if (st.running) return;
+
+    let sessionId = currentId;          // 固定本次发送的会话
+    const token = ++requestCounter;     // 请求 token：晚到的旧帧按 token 丢弃
+    st.requestToken = token;
+    st.running = true;
+    st.abortController = new AbortController();
+
     input.value = '';
     input.style.height = 'auto';
+    st.messages.push({ role: 'user', content: text, tools: [] });
 
-    const s = currentSession();
-    currentMessages.push({ role: 'user', content: text, tools: [] });
-    renderMessages();
-    setStatus(true);
+    const isViewing = () => sessionId === currentId && currentView === 'chat';
+    if (isViewing()) { renderMessages(); refreshRunUI(); }
 
+    // AI 气泡：仅当用户仍停留在该会话时挂到 DOM
     const aiEl = document.createElement('div');
     aiEl.className = 'msg ai';
-    messagesEl.appendChild(aiEl);
     const aiBody = document.createElement('div');
     aiEl.appendChild(aiBody);
-    const cursor = document.createElement('span');
-    cursor.className = 'cursor';
-    aiEl.appendChild(cursor);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    const cursorEl = document.createElement('span');
+    cursorEl.className = 'cursor';
+    aiEl.appendChild(cursorEl);
+    let attached = false;
+    const ensureAttached = () => {
+      if (!attached && isViewing()) {
+        messagesEl.appendChild(aiEl);
+        attached = true;
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+      return attached;
+    };
+    ensureAttached();
 
     const tools = [];
     const chunks = [];
+    let aborted = false;
 
     try {
       const resp = await fetch('/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text, thread_id: s.threadId }),
+        signal: st.abortController.signal,
       });
-      if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+      if (!resp.ok || !resp.body) {
+        let msg = 'HTTP ' + resp.status;
+        try {
+          const d = await resp.json();
+          msg = (d && d.error && d.error.message) || d.message || msg;
+        } catch (e2) {}
+        throw new Error(msg);
+      }
 
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
@@ -788,47 +963,68 @@
           const line = frame.split('\n').find(l => l.startsWith('data: '));
           if (!line) continue;
           let data;
-          try { data = JSON.parse(line.slice(6)); } catch { continue; }
+          try { data = JSON.parse(line.slice(6)); } catch (e3) { continue; }
+          // 晚到帧：token 不匹配则只丢弃，不写进当前切换后的会话
+          if (st.requestToken !== token) continue;
           if (data.type === 'thread') {
             if (s.isDraft) {
               s.threadId = data.thread_id;
               s.isDraft = false;
               s.id = data.thread_id;
-              currentId = data.thread_id;
+              sessionStates.set(data.thread_id, st);   // 状态迁移到真实 thread
+              sessionStates.delete(sessionId);
+              if (currentId === sessionId) currentId = data.thread_id;
+              sessionId = data.thread_id;
               localStorage.setItem('novamind_last_thread', data.thread_id);
             }
           } else if (data.type === 'tool') {
             tools.push(data.name);
-            const tag = document.createElement('span');
-            tag.className = 'tool-tag';
-            tag.textContent = '⚙ ' + data.name;
-            aiEl.insertBefore(tag, aiBody);
+            if (ensureAttached()) {
+              const tag = document.createElement('span');
+              tag.className = 'tool-tag';
+              tag.textContent = '⚙ ' + data.name;
+              aiEl.insertBefore(tag, aiBody);
+              messagesEl.scrollTop = messagesEl.scrollHeight;
+            }
           } else if (data.type === 'text') {
             chunks.push(data.content);
-            aiBody.innerHTML = renderMarkdown(chunks.join(''));
+            if (ensureAttached()) {
+              aiBody.innerHTML = renderMarkdown(chunks.join(''));
+              messagesEl.scrollTop = messagesEl.scrollHeight;
+            }
           } else if (data.type === 'limit') {
-            const seg = document.createElement('span');
-            seg.innerHTML = '<b>⚠ 达到最大循环次数</b>';
-            aiEl.insertBefore(seg, aiBody);
+            if (ensureAttached()) {
+              const seg = document.createElement('span');
+              seg.innerHTML = '<b>⚠ 达到最大循环次数</b>';
+              aiEl.insertBefore(seg, aiBody);
+            }
           } else if (data.type === 'error') {
-            const seg = document.createElement('span');
-            seg.textContent = '错误: ' + data.message;
-            aiEl.insertBefore(seg, aiBody);
+            if (ensureAttached()) {
+              const seg = document.createElement('span');
+              seg.textContent = '错误: ' + (data.message || '未知错误');
+              aiEl.insertBefore(seg, aiBody);
+            }
           }
-          messagesEl.scrollTop = messagesEl.scrollHeight;
         }
       }
     } catch (err) {
+      aborted = err.name === 'AbortError';
       const seg = document.createElement('span');
-      seg.textContent = '连接失败: ' + err.message;
-      aiEl.insertBefore(seg, cursor);
+      seg.textContent = aborted
+        ? '⏹ 已停止（本轮已取消并回滚）'
+        : '连接失败: ' + err.message;
+      if (ensureAttached()) aiEl.insertBefore(seg, aiBody);
     } finally {
-      cursor.remove();
-      addCopyBtn(aiEl, () => chunks.join(''));
-      currentMessages.push({ role: 'ai', content: chunks.join(''), tools });
-      setStatus(false);
+      cursorEl.remove();
+      if (chunks.length) addCopyBtn(aiEl, () => chunks.join(''));
+      st.running = false;
+      st.abortController = null;
+      if (chunks.length || tools.length || aborted) {
+        st.messages.push({ role: 'ai', content: chunks.join(''), tools });
+      }
+      if (sessionId === currentId) { renderMessages(); refreshRunUI(); }
       renderSessions();
-      if (!s.isDraft) await loadSessions();
+      if (!s.isDraft) loadSessions(true);  // 刷新侧边栏标题（不重新选择会话）
       input.focus();
     }
   }
@@ -836,8 +1032,7 @@
   async function loadDoctor() {
     panelEl.innerHTML = '<div class="panel-loading">正在运行架构诊断...</div>';
     try {
-      const resp = await fetch('/doctor');
-      const data = await resp.json();
+      const data = await fetchJson('/doctor');
       renderDoctor(data);
     } catch (e) {
       panelEl.innerHTML = '<div class="panel-error">诊断失败：' + escapeHtml(e.message) + '</div>';
@@ -867,17 +1062,26 @@
 
   let monitorSessions = [];
   let monitorActiveId = null;
-  async function loadMonitor() {
+  async function loadMonitor(reset = true) {
+    if (reset) {
+      pageState.monitorSessions.cursor = null;
+      pageState.monitorSessions.hasMore = false;
+      monitorSessions = [];
+    }
     panelEl.innerHTML = '<div class="panel-loading">正在加载监控数据...</div>';
     try {
-      const resp = await fetch('/monitor/sessions');
-      const data = await resp.json();
-      monitorSessions = data.sessions || [];
+      let url = '/monitor/sessions?limit=100';
+      if (pageState.monitorSessions.cursor) url += '&cursor=' + encodeURIComponent(pageState.monitorSessions.cursor);
+      const data = await fetchJson(url);
+      const items = data.sessions || [];
+      monitorSessions = reset ? items : monitorSessions.concat(items);
+      pageState.monitorSessions.cursor = (data.pagination && data.pagination.next_cursor) || null;
+      pageState.monitorSessions.hasMore = !!(data.pagination && data.pagination.has_more);
       if (!monitorSessions.length) {
         panelEl.innerHTML = '<div class="panel-header"><span class="bar">❯</span> 监控面板</div><div class="panel-empty">暂无会话日志，先进行一轮对话后再查看。</div>';
         return;
       }
-      monitorActiveId = monitorSessions[0].thread_id;
+      if (reset || !monitorActiveId) monitorActiveId = monitorSessions[0].thread_id;
       await renderMonitor();
     } catch (e) {
       panelEl.innerHTML = '<div class="panel-error">加载监控失败：' + escapeHtml(e.message) + '</div>';
@@ -885,8 +1089,7 @@
   }
   async function fetchEvents(threadId) {
     try {
-      const resp = await fetch('/monitor/events/' + encodeURIComponent(threadId));
-      const data = await resp.json();
+      const data = await fetchJson('/monitor/events/' + encodeURIComponent(threadId));
       return data.events || [];
     } catch (e) { return []; }
   }
@@ -922,10 +1125,13 @@
       ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
   async function renderMonitor() {
-    const msHtml = monitorSessions.map(s =>
+    let msHtml = monitorSessions.map(s =>
       '<div class="ms-item' + (s.thread_id === monitorActiveId ? ' active' : '') + '" data-tid="' + escapeHtml(s.thread_id) + '">' +
       escapeHtml(s.thread_id) + '<div class="ms-size">' + (s.size_bytes / 1024).toFixed(1) + ' KB</div></div>'
     ).join('');
+    if (pageState.monitorSessions.hasMore) {
+      msHtml += '<div class="load-more" id="monitor-load-more">加载更多…</div>';
+    }
 
     const events = await fetchEvents(monitorActiveId);
     let evHtml = '';
@@ -952,14 +1158,28 @@
         await renderMonitor();
       });
     });
+    const more = panelEl.querySelector('#monitor-load-more');
+    if (more) more.addEventListener('click', () => loadMonitor(false));
   }
 
-  async function loadSkills() {
+  let skillsCache = [];
+  async function loadSkills(reset = true) {
+    if (reset) {
+      pageState.skills.cursor = null;
+      pageState.skills.hasMore = false;
+      skillsCache = [];
+    }
     panelEl.innerHTML = '<div class="panel-loading">正在加载技能库...</div>';
     try {
-      const resp = await fetch('/skills');
-      const data = await resp.json();
-      renderSkills(data);
+      let url = '/skills?limit=100';
+      if (pageState.skills.cursor) url += '&cursor=' + encodeURIComponent(pageState.skills.cursor);
+      const data = await fetchJson(url);
+      const items = data.skills || [];
+      skillsCache = reset ? items : skillsCache.concat(items);
+      pageState.skills.cursor = (data.pagination && data.pagination.next_cursor) || null;
+      pageState.skills.hasMore = !!(data.pagination && data.pagination.has_more);
+      pageState.skills.count = data.count || 0;
+      renderSkills({ skills: skillsCache, count: pageState.skills.count });
     } catch (e) {
       panelEl.innerHTML = '<div class="panel-error">加载技能失败：' + escapeHtml(e.message) + '</div>';
     }
@@ -987,9 +1207,16 @@
       });
       html += '</div>';
     }
+    if (pageState.skills.hasMore) {
+      html += '<div class="load-more" id="skills-load-more">加载更多…</div>';
+    }
     panelEl.innerHTML = html;
+    const more = panelEl.querySelector('#skills-load-more');
+    if (more) more.addEventListener('click', () => loadSkills(false));
   }
 
+  const stopBtn = document.getElementById('stop');
+  stopBtn.addEventListener('click', stopCurrent);
   document.getElementById('new-chat').addEventListener('click', newChat);
   sendBtn.addEventListener('click', send);
   input.addEventListener('keydown', function (e) {
@@ -1005,6 +1232,7 @@
 
   loadSessions();
 })();
+
 </script>
 </body>
 </html>
