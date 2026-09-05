@@ -322,5 +322,72 @@ class TestSummaryLLMEvaluation(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestSummaryResultImmutable(unittest.TestCase):
+    """Phase 3：generate_summary_result 返回不可变结果，无跨线程共享通道。"""
+
+    def setUp(self):
+        self.ctx = ContextManager(trigger_turns=4, keep_turns=2)
+
+    def test_result_returns_evaluation_without_shared_channel(self):
+        discarded = [
+            HumanMessage(content="discussing Python project architecture design"),
+            AIMessage(content="Python architecture is important"),
+        ]
+        result = self.ctx.generate_summary_result(
+            "讨论了 Python 架构设计", discarded
+        )
+        self.assertTrue(result.evaluation)
+        self.assertEqual(result.evaluation["quality"], "good")
+        # 不写实例级共享通道（并发安全的关键）
+        self.assertIsNone(self.ctx._last_summary_eval)
+        # 结果不可变
+        with self.assertRaises(AttributeError):
+            result.summary = "tampered"
+        with self.assertRaises(TypeError):
+            result.evaluation["quality"] = "low"
+
+    def test_concurrent_results_not_crossed(self):
+        import concurrent.futures
+
+        good_discarded = [
+            HumanMessage(content="discussing Python project architecture design"),
+            AIMessage(content="Python architecture is important"),
+        ]
+        low_discarded = [
+            HumanMessage(content="Python architecture design factory singleton"),
+            AIMessage(content="design patterns are important"),
+        ]
+        summary = "the weather is nice today"  # 与既有低质量用例一致
+
+        # 顺序预期（无 LLM 回退路径：摘要由被丢弃文本截断生成，
+        # 两组输入的截断结果与评估必然不同）
+        good_expected = self.ctx.generate_summary_result("s", good_discarded)
+        low_expected = self.ctx.generate_summary_result(summary, low_discarded)
+        self.assertNotEqual(good_expected.summary, low_expected.summary)
+        self.assertNotEqual(
+            dict(good_expected.evaluation), dict(low_expected.evaluation)
+        )
+
+        # 并发执行：同一实例、两个线程，各自结果互不串扰
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {
+                "good": pool.submit(
+                    self.ctx.generate_summary_result, "s", good_discarded),
+                "low": pool.submit(
+                    self.ctx.generate_summary_result, summary, low_discarded),
+            }
+            good_actual = futures["good"].result()
+            low_actual = futures["low"].result()
+
+        self.assertEqual(
+            dict(good_actual.evaluation), dict(good_expected.evaluation)
+        )
+        self.assertEqual(
+            dict(low_actual.evaluation), dict(low_expected.evaluation)
+        )
+        # 共享通道始终未被触碰
+        self.assertIsNone(self.ctx._last_summary_eval)
+
+
 if __name__ == "__main__":
     unittest.main()

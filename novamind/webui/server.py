@@ -35,6 +35,19 @@ _history_store: ConversationStore | None = None
 _skill_store: Any = None
 _chat_lock = asyncio.Lock()
 
+# Phase 3：Web 层容量限制（模型/工具并发上限）。每 thread 的正确性仍由
+# Agent 的 per-thread 协调器负责，这里只做全局容量保护；当前 _chat_lock
+# 仍是全局串行，本信号量为后续放开 Web 层并发做准备。
+def _capacity_from_env(env_key: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(env_key, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+_MODEL_CAPACITY = asyncio.Semaphore(_capacity_from_env("NOVAMIND_WEB_MAX_MODELS", 4))
+_TOOL_CAPACITY = asyncio.Semaphore(_capacity_from_env("NOVAMIND_WEB_MAX_TOOLS", 8))
+
 
 def _safe_id(thread_id: str) -> str:
     """thread_id → 日志文件名（与 logger 的 safe_id 逻辑一致）。"""
@@ -157,28 +170,31 @@ async def _stream_chat(request: ChatRequest):
         # 串行化：agent 内部状态非并发安全，单例 agent 一次只处理一轮对话
         async with _chat_lock:
             agent = get_agent()
-            async for event in agent.astream(request.message, thread_id=thread_id):
-                for node_name, node_data in event.items():
-                    if node_name == "agent":
-                        messages = node_data.get("messages") or []
-                        last = messages[-1] if messages else None
-                        if last is None:
-                            continue
-                        tool_calls = getattr(last, "tool_calls", None)
-                        if tool_calls:
-                            for tc in tool_calls:
-                                name = (
-                                    tc.get("name")
-                                    if isinstance(tc, dict)
-                                    else getattr(tc, "name", "?")
-                                )
-                                yield _sse({"type": "tool", "name": name})
-                        else:
-                            content = _content_str(getattr(last, "content", ""))
-                            if content:
-                                yield _sse({"type": "text", "content": content})
-                    elif node_name == "__limit__":
-                        yield _sse({"type": "limit"})
+            # Phase 3：Web 层模型容量保护（工具经 agent 内部执行，容量由
+            # Agent 的 per-thread 协调器保证正确性）
+            async with _MODEL_CAPACITY:
+                async for event in agent.astream(request.message, thread_id=thread_id):
+                    for node_name, node_data in event.items():
+                        if node_name == "agent":
+                            messages = node_data.get("messages") or []
+                            last = messages[-1] if messages else None
+                            if last is None:
+                                continue
+                            tool_calls = getattr(last, "tool_calls", None)
+                            if tool_calls:
+                                for tc in tool_calls:
+                                    name = (
+                                        tc.get("name")
+                                        if isinstance(tc, dict)
+                                        else getattr(tc, "name", "?")
+                                    )
+                                    yield _sse({"type": "tool", "name": name})
+                            else:
+                                content = _content_str(getattr(last, "content", ""))
+                                if content:
+                                    yield _sse({"type": "text", "content": content})
+                        elif node_name == "__limit__":
+                            yield _sse({"type": "limit"})
     except Exception as exc:
         logger.exception("chat stream failed")
         yield _sse({"type": "error", "message": str(exc)})
@@ -343,7 +359,8 @@ async def delete_session(thread_id: str):
         # 与流式对话共用锁：避免正在结束的 Agent 在删除后把旧状态重新落盘。
         async with _chat_lock:
             if _agent is not None:
-                _agent.clear_conversation(thread_id)
+                # Phase 3：走 Agent 的按 thread 互斥删除（等待在飞轮次结束）
+                await _agent.aclear_conversation(thread_id)
             else:
                 get_history_store().clear_thread(thread_id)
         return {"status": "ok"}

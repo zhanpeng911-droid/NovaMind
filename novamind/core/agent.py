@@ -283,17 +283,19 @@ def create_agent_app(
 
         if discarded_msgs:
             print("\033[K \033[38;5;141m ● 正在更新上下文记忆... \033[0m")
-            # 摘要生成涉及同步LLM调用，隔离到线程池避免阻塞事件循环
-            new_summary = await asyncio.to_thread(
-                context_manager.generate_summary, current_summary, discarded_msgs
+            # 摘要生成涉及同步LLM调用，隔离到线程池避免阻塞事件循环；
+            # Phase 3：评估结果随 SummaryResult 返回，不再经 ContextManager
+            # 实例的共享字段跨线程传递。
+            summary_result = await asyncio.to_thread(
+                context_manager.generate_summary_result, current_summary, discarded_msgs
             )
-            state_updates["summary"] = new_summary
+            state_updates["summary"] = summary_result.summary
             # 从状态中删除旧消息
             delete_cmds = [RemoveMessage(id=m.id) for m in discarded_msgs if m.id]
             state_updates["messages"] = delete_cmds
 
             # 记录摘要质量评估到审计日志
-            eval_result = context_manager._last_summary_eval
+            eval_result = summary_result.evaluation or None
             if eval_result:
                 _audit.log_event(
                     thread_id=thread_id,

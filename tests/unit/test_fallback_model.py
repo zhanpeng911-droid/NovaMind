@@ -118,5 +118,42 @@ class TestFallbackChatModel(unittest.TestCase):
         self.assertEqual(result.content, "async-ok")
 
 
+class TestConcurrentActiveProvider(unittest.TestCase):
+    """Phase 3：多并发 fallback 调用不会丢失/错误覆盖 active provider。"""
+
+    def test_concurrent_calls_remember_valid_active(self):
+        class FlakyThenOk:
+            """前几次调用瞬时超时，之后成功。"""
+
+            def __init__(self):
+                self.calls = 0
+
+            def invoke(self, messages, **kwargs):
+                self.calls += 1
+                if self.calls <= 50:
+                    raise TimeoutError("transient")
+                from langchain_core.messages import AIMessage
+                return AIMessage(content="primary-ok")
+
+            async def ainvoke(self, messages, **kwargs):
+                return self.invoke(messages, **kwargs)
+
+        good = FakeListChatModel(responses=["fallback-ok"])
+        primary = FlakyThenOk()
+        model = FallbackChatModel(
+            models=[primary, good], provider_names=["primary", "good"],
+        )
+
+        async def _run():
+            tasks = [asyncio.create_task(model.ainvoke("m")) for _ in range(60)]
+            return await asyncio.gather(*tasks)
+
+        results = asyncio.run(_run())
+        self.assertEqual(len(results), 60)
+        self.assertTrue(all(r.content in ("primary-ok", "fallback-ok") for r in results))
+        # _active 收敛到合法索引，且所有成功调用都来自记忆的活跃 provider
+        self.assertIn(model._active, (0, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

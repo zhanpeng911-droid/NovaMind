@@ -159,6 +159,10 @@ class _BlockingPersistingAgent:
         self._states.pop(thread_id, None)
         self.store.clear_thread(thread_id)
 
+    async def aclear_conversation(self, thread_id):
+        """Phase 3 删除契约：与 run/astream 按 thread 互斥的异步清除。"""
+        self.clear_conversation(thread_id)
+
 
 class TestSessionDeletionConsistency(unittest.TestCase):
     def test_delete_waits_for_active_chat_then_clears_agent_cache_and_history(self):

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, override
 
 from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
@@ -48,6 +49,17 @@ class FallbackChatModel(BaseChatModel):
     models: list[Any]  # BaseChatModel 或其 bind_tools 后的 RunnableBinding
     provider_names: list[str] = []
     _active: int = PrivateAttr(default=0)
+    # Phase 3：保护 _active 的起始快照与成功更新；只在内存操作时持有，
+    # 绝不跨模型网络调用持有（否则并发调用会被串行化）。
+    _active_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+
+    def _snapshot_active(self) -> int:
+        with self._active_lock:
+            return self._active
+
+    def _store_active(self, idx: int) -> None:
+        with self._active_lock:
+            self._active = idx
 
     @override
     def _generate(
@@ -59,12 +71,13 @@ class FallbackChatModel(BaseChatModel):
     ) -> ChatResult:
         last_exc: Exception | None = None
         n = len(self.models)
+        start = self._snapshot_active()
         for offset in range(n):
-            idx = (self._active + offset) % n
+            idx = (start + offset) % n
             try:
                 # 用 invoke 兼容 BaseChatModel 与 bind_tools 后的 RunnableBinding
                 ai: AIMessage = self.models[idx].invoke(messages, stop=stop, **kwargs)
-                self._active = idx
+                self._store_active(idx)
                 return ChatResult(generations=[ChatGeneration(message=ai)])
             except Exception as exc:
                 if not _should_fallback(exc):
@@ -84,11 +97,12 @@ class FallbackChatModel(BaseChatModel):
     ) -> ChatResult:
         last_exc: Exception | None = None
         n = len(self.models)
+        start = self._snapshot_active()
         for offset in range(n):
-            idx = (self._active + offset) % n
+            idx = (start + offset) % n
             try:
                 ai: AIMessage = await self.models[idx].ainvoke(messages, stop=stop, **kwargs)
-                self._active = idx
+                self._store_active(idx)
                 return ChatResult(generations=[ChatGeneration(message=ai)])
             except Exception as exc:
                 if not _should_fallback(exc):

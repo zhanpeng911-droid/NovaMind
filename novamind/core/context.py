@@ -17,13 +17,26 @@ import os
 import json
 import platform
 import re
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Any, Mapping
 from langchain_core.messages import (
     BaseMessage, SystemMessage, HumanMessage
 )
 from . import config as _config
 from .config import DOCS_DIR
+
+
+@dataclass(frozen=True)
+class SummaryResult:
+    """摘要生成结果（不可变）：summary + 质量评估。
+
+    Phase 3：取代 _last_summary_eval 作为跨调用通道——评估结果随返回值
+    交付给调用方，多线程各自持有，不再经 ContextManager 实例共享。
+    evaluation 以只读 Mapping 暴露。"""
+
+    summary: str
+    evaluation: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
 
 @dataclass(frozen=True)
@@ -351,30 +364,30 @@ class ContextManager:
             # LLM 返回格式异常，优雅回退
             return None
 
-    def generate_summary(
+    def generate_summary_result(
         self,
         current_summary: str,
         discarded_messages: list[BaseMessage],
-    ) -> str:
+    ) -> SummaryResult:
         """
-        用LLM将被丢弃的消息压缩为摘要
+        用LLM将被丢弃的消息压缩为摘要，并附带质量评估（不可变结果）。
 
-        如果没有LLM实例，返回简单拼接的文本摘要。
-        生成后自动执行轻量级质量评估，结果存入 self._last_summary_eval。
+        Phase 3：评估结果随返回值交付（SummaryResult.evaluation），不再写入
+        ContextManager 实例的共享字段——多线程各自持有结果，互不串扰。
         """
         discarded_text = "\n".join(
             [f"{m.type}: {m.content}" for m in discarded_messages if m.content]
         )
 
         if not discarded_text.strip():
-            return current_summary
+            return SummaryResult(summary=current_summary)
 
         if self._llm is None:
             # 无LLM时的回退策略：简单截断
             combined = f"{current_summary}\n{discarded_text}"
             summary = combined[-self._summary_max_chars:]
-            self._last_summary_eval = self._evaluate_summary(summary, discarded_messages)
-            return summary
+            evaluation = self._evaluate_summary(summary, discarded_messages)
+            return SummaryResult(summary=summary, evaluation=MappingProxyType(evaluation))
 
         summary_prompt = (
             f"你是一个负责维护 AI 工作台上下文的后台模块。\n\n"
@@ -405,16 +418,32 @@ class ContextManager:
             summary = summary[:hard_limit]
 
         # 第一层：词法评估（始终执行，零成本）
-        self._last_summary_eval = self._evaluate_summary(summary, discarded_messages)
+        evaluation = self._evaluate_summary(summary, discarded_messages)
 
         # 第二层：LLM 二次评估（仅在词法评估为 low/acceptable 时触发，避免浪费调用）
         evaluator = self._evaluator_llm or self._llm
-        if evaluator and self._last_summary_eval["quality"] in ("low", "acceptable"):
+        if evaluator and evaluation["quality"] in ("low", "acceptable"):
             llm_eval = self._evaluate_summary_with_llm(summary, discarded_messages, evaluator)
             if llm_eval:
-                self._last_summary_eval.update(llm_eval)
+                evaluation.update(llm_eval)
 
-        return summary
+        return SummaryResult(summary=summary, evaluation=MappingProxyType(evaluation))
+
+    def generate_summary(
+        self,
+        current_summary: str,
+        discarded_messages: list[BaseMessage],
+    ) -> str:
+        """
+        用LLM将被丢弃的消息压缩为摘要（向后兼容接口）。
+
+        生成后自动执行轻量级质量评估，结果存入 self._last_summary_eval。
+        多线程并发场景请改用 generate_summary_result()（结果随返回值交付）。
+        """
+        result = self.generate_summary_result(current_summary, discarded_messages)
+        if result.evaluation:
+            self._last_summary_eval = dict(result.evaluation)
+        return result.summary
 
     def load_user_profile(self) -> str:
         """读取用户长期画像文件"""
