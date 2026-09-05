@@ -247,6 +247,7 @@ class TestApiSuccessContract(unittest.TestCase):
     def test_skills_contract(self):
         store = MagicMock()
         store.list_active.return_value = []
+        store.count_active.return_value = 0
         with patch("novamind.webui.server.get_skill_store", return_value=store):
             body = self.client.get("/skills").json()
         self.assertEqual(set(body.keys()), {"skills", "count"})

@@ -141,19 +141,24 @@ class TestStreamChat(unittest.TestCase):
 
 
 class _BlockingPersistingAgent:
-    """模拟流式收尾才落盘、且缓存会话状态的运行中 Agent。"""
+    """模拟流式收尾才落盘、且缓存会话状态的运行中 Agent。
+
+    Phase 5：astream 与 aclear_conversation 同锁互斥——模拟真实 Agent
+    per-thread 协调器的契约（删除等待在飞轮次结束）。"""
 
     def __init__(self, store):
         self.store = store
         self._states = {"t1": object()}
         self.started = asyncio.Event()
         self.release = asyncio.Event()
+        self.turn_lock = asyncio.Lock()
 
     async def astream(self, _message, thread_id=None):
-        self.started.set()
-        await self.release.wait()
-        self.store.save_message(thread_id, AIMessage(content="late response"))
-        yield {"agent": {"messages": [AIMessage(content="late response")]}}
+        async with self.turn_lock:
+            self.started.set()
+            await self.release.wait()
+            self.store.save_message(thread_id, AIMessage(content="late response"))
+            yield {"agent": {"messages": [AIMessage(content="late response")]}}
 
     def clear_conversation(self, thread_id):
         self._states.pop(thread_id, None)
@@ -161,7 +166,29 @@ class _BlockingPersistingAgent:
 
     async def aclear_conversation(self, thread_id):
         """Phase 3 删除契约：与 run/astream 按 thread 互斥的异步清除。"""
-        self.clear_conversation(thread_id)
+        async with self.turn_lock:
+            self.clear_conversation(thread_id)
+
+
+class _FakeRuntime:
+    """Phase 5：WebRuntime 测试替身（capacity 用真信号量，组件可注入）。"""
+
+    def __init__(self, agent, store):
+        self._agent = agent
+        self._store = store
+        self.capacity = asyncio.Semaphore(1)
+
+    def agent_if_ready(self):
+        return self._agent
+
+    def get_history_store(self):
+        return self._store
+
+    def register_task(self, task):
+        pass
+
+    def unregister_task(self, task):
+        pass
 
 
 class TestSessionDeletionConsistency(unittest.TestCase):
@@ -186,10 +213,12 @@ class TestSessionDeletionConsistency(unittest.TestCase):
                 await stream_task
                 return await delete_task
 
-            with mock.patch("novamind.webui.server._agent", agent), mock.patch(
-                "novamind.webui.server._history_store", store
-            ):
-                response = asyncio.run(exercise())
+            # Phase 5：组件持有者改为 WebRuntime；补丁 get_agent（流式）
+            # 与 get_runtime（删除走 runtime.agent_if_ready）
+            fake_runtime = _FakeRuntime(agent, store)
+            with mock.patch("novamind.webui.server.get_agent", return_value=agent),                     mock.patch("novamind.webui.server.get_runtime",
+                               return_value=fake_runtime):
+                response = asyncio.run(exercise()).model_dump(exclude_none=True)
 
             self.assertEqual(response, {"status": "ok"})
             self.assertNotIn("t1", agent._states)
@@ -275,7 +304,7 @@ class TestMonitorEndpoints(unittest.TestCase):
     def test_monitor_sessions_lists_logs(self):
         self._write_log("s1.jsonl", [{"event": "ai_message", "ts": "2026-01-01T00:00:00"}])
         self._write_log("s2.jsonl", [{"event": "tool_call", "ts": "2026-01-02T00:00:00"}])
-        result = asyncio.run(monitor_sessions())
+        result = asyncio.run(monitor_sessions()).model_dump()
         ids = {s["thread_id"] for s in result["sessions"]}
         self.assertEqual(ids, {"s1", "s2"})
 
@@ -285,12 +314,12 @@ class TestMonitorEndpoints(unittest.TestCase):
             f.write(json.dumps({"event": "tool_call", "ts": "2026-01-01T00:00:00", "tool": "search"}) + "\n")
             f.write(json.dumps({"event": "ai_message", "ts": "2026-01-01T00:00:01", "content": "hi"}) + "\n")
             f.write("{broken json\n")  # 真正的坏行
-        result = asyncio.run(monitor_events("s1"))
+        result = asyncio.run(monitor_events("s1")).model_dump()
         self.assertEqual(len(result["events"]), 2)  # 坏行被跳过
         self.assertEqual(result["events"][0]["event"], "tool_call")
 
     def test_monitor_events_missing(self):
-        result = asyncio.run(monitor_events("nonexistent"))
+        result = asyncio.run(monitor_events("nonexistent")).model_dump()
         self.assertEqual(result["events"], [])
 
 
@@ -312,7 +341,7 @@ class TestSkillsEndpoint(unittest.TestCase):
         with mock.patch(
             "novamind.webui.server.get_skill_store", return_value=fake_store
         ):
-            result = asyncio.run(list_skills())
+            result = asyncio.run(list_skills()).model_dump()
 
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["skills"][0]["name"], "search")
@@ -322,7 +351,7 @@ class TestSkillsEndpoint(unittest.TestCase):
         with mock.patch(
             "novamind.webui.server.get_skill_store", side_effect=RuntimeError("db locked")
         ):
-            result = asyncio.run(list_skills())
+            result = asyncio.run(list_skills()).model_dump()
         self.assertEqual(result["count"], 0)
         self.assertIn("db locked", result["error"])
 

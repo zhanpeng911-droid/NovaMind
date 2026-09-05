@@ -1,57 +1,66 @@
 """NovaMind WebUI 后端（FastAPI + SSE 流式）。
 
 复用 create_agent_app + agent.astream，把 Agent 的异步流式输出以 SSE 推给前端。
-单例 agent（懒加载，首次 /chat 时创建）。
+
+加固 Phase 5：
+- WebRuntime（lifespan 持有）替代模块级单例与全局 chat 锁；
+- SSE 语义：断连即取消本轮（显式 re-raise CancelledError，不向死连接写
+  done）；普通运行错误发 error + done；done 只在正常完成时发；
+- API 边界：请求体大小限制（同时校验 Content-Length 与实际字节）、
+  /chat 只接受 JSON、统一错误形状、response_model 声明；
+- 分页：sessions/history/monitor/skills 走稳定游标（带版本 base64url）。
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from novamind.core.agent import create_agent_app
-from novamind.core.provider import get_provider
-from novamind.core.middlewares.default_stack import build_default_middlewares
-from novamind.core.config import DB_PATH, LOG_DIR, SKILL_DB_PATH
+from novamind.core.config import LOG_DIR
 from novamind.core.state_machine import ConversationStore
+from novamind.webui.api_models import (
+    DeleteResponse,
+    HealthResponse,
+    HistoryResponse,
+    InvalidCursorError,
+    MonitorEventsResponse,
+    MonitorSessionsResponse,
+    PaginationMeta,
+    SessionsResponse,
+    SkillsResponse,
+    decode_cursor,
+    encode_cursor,
+)
+from novamind.webui.runtime import WebRuntime
 
 logger = logging.getLogger("novamind.webui")
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-_agent: Any = None
-_history_store: ConversationStore | None = None
-_skill_store: Any = None
-_chat_lock = asyncio.Lock()
-
-# Phase 3：Web 层容量限制（模型/工具并发上限）。每 thread 的正确性仍由
-# Agent 的 per-thread 协调器负责，这里只做全局容量保护；当前 _chat_lock
-# 仍是全局串行，本信号量为后续放开 Web 层并发做准备。
-def _capacity_from_env(env_key: str, default: int) -> int:
-    try:
-        return max(1, int(os.getenv(env_key, str(default))))
-    except (TypeError, ValueError):
-        return default
+# 请求体上限（默认 1MB，可经环境覆盖）
+_BODY_LIMIT = int(os.getenv("NOVAMIND_WEB_BODY_LIMIT", str(1024 * 1024)) or 1048576)
 
 
-_MODEL_CAPACITY = asyncio.Semaphore(_capacity_from_env("NOVAMIND_WEB_MAX_MODELS", 4))
-_TOOL_CAPACITY = asyncio.Semaphore(_capacity_from_env("NOVAMIND_WEB_MAX_TOOLS", 8))
-
-
-def _safe_id(thread_id: str) -> str:
-    """thread_id → 日志文件名（与 logger 的 safe_id 逻辑一致）。"""
-    return "".join(c for c in thread_id if c.isalnum() or c in "-_") or "default"
+def _load_env() -> tuple[str, str]:
+    """从 .env 读 provider/model（与 CLI 一致）。"""
+    load_dotenv(_resolve_env_path())
+    provider = os.getenv("DEFAULT_PROVIDER", "openai")
+    model = os.getenv("DEFAULT_MODEL", "gpt-4o-mini")
+    return provider, model
 
 
 def _resolve_env_path() -> Path:
@@ -91,52 +100,35 @@ def _resolve_env_path() -> Path:
     return Path.cwd() / ".env"
 
 
-def _load_env() -> tuple[str, str]:
-    """从 .env 读 provider/model（与 CLI 一致）。"""
-    load_dotenv(_resolve_env_path())
-    provider = os.getenv("DEFAULT_PROVIDER", "openai")
-    model = os.getenv("DEFAULT_MODEL", "gpt-4o-mini")
-    return provider, model
+# ── WebRuntime 单例（lifespan 创建；模块级访问器保持测试兼容） ────────────
+
+_runtime: WebRuntime | None = None
+
+
+def get_runtime() -> WebRuntime:
+    """返回当前运行时；lifespan 之外（如单元测试直调）按需补建。"""
+    global _runtime
+    if _runtime is None:
+        _runtime = WebRuntime()
+    return _runtime
 
 
 def get_agent() -> Any:
-    """单例 agent（懒加载）。"""
-    global _agent
-    if _agent is None:
-        provider, model = _load_env()
-        # 缺陷#2 修复：默认 GUI 后端也挂载记忆/治理中间件
-        llm = get_provider(provider_name=provider, model_name=model)
-        _agent = create_agent_app(provider_name=provider, model_name=model,
-                                  middlewares=build_default_middlewares(llm))
-    return _agent
+    """单例 agent 访问器（兼容旧调用点；实际持有者在 WebRuntime）。"""
+    return get_runtime().get_agent()
 
 
 def get_history_store() -> ConversationStore:
-    """独立的历史读取 store（只读，与 agent 的写 store 共享同一 SQLite 文件）。"""
-    global _history_store
-    if _history_store is None:
-        _history_store = ConversationStore(db_path=DB_PATH)
-    return _history_store
+    return get_runtime().get_history_store()
 
 
 def get_skill_store() -> Any:
-    """单例技能 store（懒加载，首次访问时 discover 内置技能）。"""
-    global _skill_store
-    if _skill_store is None:
-        from novamind.core.skill import SQLiteSkillStore
-        import novamind.core.skill as skill_pkg
-
-        store = SQLiteSkillStore(SKILL_DB_PATH)
-        builtin_dir = Path(skill_pkg.__file__).parent / "builtin_skills"
-        if builtin_dir.exists():
-            store.discover([builtin_dir], origin="BUILTIN")
-        _skill_store = store
-    return _skill_store
+    return get_runtime().get_skill_store()
 
 
-class ChatRequest(BaseModel):
-    message: str
-    thread_id: str | None = None
+def _safe_id(thread_id: str) -> str:
+    """thread_id → 日志文件名（与 logger 的 safe_id 逻辑一致）。"""
+    return "".join(c for c in thread_id if c.isalnum() or c in "-_") or "default"
 
 
 def _content_str(content: Any) -> str:
@@ -162,51 +154,136 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-async def _stream_chat(request: ChatRequest):
-    thread_id = request.thread_id or f"gui_{uuid.uuid4().hex[:12]}"
-    yield _sse({"type": "thread", "thread_id": thread_id})
+class ChatRequest(BaseModel):
+    message: str
+    thread_id: str | None = None
 
+
+class _BodyTooLargeError(Exception):
+    """实际接收字节超过上限（覆盖 chunked / 伪造 Content-Length）。"""
+
+
+class BodyLimitMiddleware:
+    """纯 ASGI 中间件：请求体大小限制 + /chat JSON-only。
+
+    - 先查 Content-Length 头（快速拒绝）；
+    - 再包装 receive 统计实际累计字节，覆盖 chunked 与伪造头；
+    - 超限/类型不符返回统一错误形状（413/415）。
+    """
+
+    def __init__(self, app: Any, limit: int = _BODY_LIMIT):
+        self.app = app
+        self.limit = limit
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1")
+            for k, v in scope.get("headers", [])
+        }
+        path = scope.get("path", "")
+
+        if path == "/chat":
+            ctype = headers.get("content-type", "").split(";")[0].strip().lower()
+            if ctype != "application/json":
+                await self._send_error(send, 415, "unsupported_media_type",
+                                       "/chat 只接受 JSON 请求体")
+                return
+
+        content_length = headers.get("content-length", "")
+        if content_length.isdigit() and int(content_length) > self.limit:
+            await self._send_error(send, 413, "body_too_large",
+                                   f"请求体超过 {self.limit} 字节上限")
+            return
+
+        state = {"size": 0}
+
+        async def sized_receive():
+            msg = await receive()
+            if msg.get("type") == "http.request":
+                state["size"] += len(msg.get("body", b"") or b"")
+                if state["size"] > self.limit:
+                    raise _BodyTooLargeError()
+            return msg
+
+        try:
+            await self.app(scope, sized_receive, send)
+        except _BodyTooLargeError:
+            await self._send_error(send, 413, "body_too_large",
+                                   f"请求体超过 {self.limit} 字节上限")
+
+    async def _send_error(self, send: Any, status: int, code: str, message: str) -> None:
+        body = json.dumps({
+            "error": {
+                "code": code,
+                "message": message,
+                "request_id": uuid.uuid4().hex,
+            }
+        }, ensure_ascii=False).encode("utf-8")
+        try:
+            await send({
+                "type": "http.response.start",
+                "status": status,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            })
+            await send({"type": "http.response.body", "body": body})
+        except Exception:  # 响应已开始时无法再发错误页，安全忽略
+            pass
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    global _runtime
+    _runtime = WebRuntime()
+    app.state.runtime = _runtime
     try:
-        # 串行化：agent 内部状态非并发安全，单例 agent 一次只处理一轮对话
-        async with _chat_lock:
-            agent = get_agent()
-            # Phase 3：Web 层模型容量保护（工具经 agent 内部执行，容量由
-            # Agent 的 per-thread 协调器保证正确性）
-            async with _MODEL_CAPACITY:
-                async for event in agent.astream(request.message, thread_id=thread_id):
-                    for node_name, node_data in event.items():
-                        if node_name == "agent":
-                            messages = node_data.get("messages") or []
-                            last = messages[-1] if messages else None
-                            if last is None:
-                                continue
-                            tool_calls = getattr(last, "tool_calls", None)
-                            if tool_calls:
-                                for tc in tool_calls:
-                                    name = (
-                                        tc.get("name")
-                                        if isinstance(tc, dict)
-                                        else getattr(tc, "name", "?")
-                                    )
-                                    yield _sse({"type": "tool", "name": name})
-                            else:
-                                content = _content_str(getattr(last, "content", ""))
-                                if content:
-                                    yield _sse({"type": "text", "content": content})
-                        elif node_name == "__limit__":
-                            yield _sse({"type": "limit"})
-    except Exception as exc:
-        logger.exception("chat stream failed")
-        yield _sse({"type": "error", "message": str(exc)})
+        yield
     finally:
-        yield _sse({"type": "done"})
+        await _runtime.shutdown()
+        _runtime = None
 
 
-app = FastAPI(title="NovaMind WebUI")
+app = FastAPI(title="NovaMind WebUI", lifespan=_lifespan)
+app.add_middleware(BodyLimitMiddleware, limit=_BODY_LIMIT)
 
 
-@app.post("/chat")
-async def chat(request: ChatRequest):
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """422：字段验证失败，统一错误形状（FastAPI 默认 detail 形状弃用）。"""
+    return _error_response(422, "validation_error", f"字段验证失败: {exc.errors()[:1]}")
+
+
+@app.exception_handler(InvalidCursorError)
+async def invalid_cursor_handler(request: Request, exc: InvalidCursorError):
+    return _error_response(400, "invalid_cursor", str(exc))
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """500：服务端日志保留 traceback，客户端只拿稳定 code/message/request_id。"""
+    logger.exception("unhandled error on %s %s", request.method, request.url.path)
+    return _error_response(500, "internal_error", "服务器内部错误")
+
+
+def _error_response(status: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={"error": {"code": code, "message": message,
+                           "request_id": uuid.uuid4().hex}},
+    )
+
+
+@app.post("/chat", responses={
+    200: {"content": {"text/event-stream": {}},
+          "description": "SSE 事件流（thread/tool/text/limit/error/done）"},
+})
+async def chat(request: ChatRequest) -> StreamingResponse:
     return StreamingResponse(
         _stream_chat(request),
         media_type="text/event-stream",
@@ -214,9 +291,72 @@ async def chat(request: ChatRequest):
     )
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
+async def _stream_chat(request: ChatRequest) -> AsyncIterator[str]:
+    runtime = get_runtime()
+    thread_id = request.thread_id or f"gui_{uuid.uuid4().hex[:12]}"
+    yield _sse({"type": "thread", "thread_id": thread_id})
+
+    task = asyncio.current_task()
+    runtime.register_task(task)
+    gen = None
+    stream_error: dict | None = None
+    try:
+        # Phase 5：移除全局 chat 锁——先拿容量许可，正确性由 Agent 的
+        # per-thread 协调器保证（同 thread 串行，跨 thread 并发）。
+        async with runtime.capacity:
+            agent_or_coro = get_agent()
+            agent = (
+                await agent_or_coro if asyncio.iscoroutine(agent_or_coro)
+                else agent_or_coro
+            )
+            gen = agent.astream(request.message, thread_id=thread_id)
+            async for event in gen:
+                for node_name, node_data in event.items():
+                    if node_name == "agent":
+                        messages = node_data.get("messages") or []
+                        last = messages[-1] if messages else None
+                        if last is None:
+                            continue
+                        tool_calls = getattr(last, "tool_calls", None)
+                        if tool_calls:
+                            for tc in tool_calls:
+                                name = (
+                                    tc.get("name")
+                                    if isinstance(tc, dict)
+                                    else getattr(tc, "name", "?")
+                                )
+                                yield _sse({"type": "tool", "name": name})
+                        else:
+                            content = _content_str(getattr(last, "content", ""))
+                            if content:
+                                yield _sse({"type": "text", "content": content})
+                    elif node_name == "__limit__":
+                        yield _sse({"type": "limit"})
+    except asyncio.CancelledError:
+        # 断连/停机：显式处理并 re-raise；finally 的 aclose 会取消本轮并
+        # 回滚半轮状态，不向已死连接写 done。
+        raise
+    except Exception as exc:
+        logger.exception("chat stream failed")
+        stream_error = {"type": "error", "message": str(exc)}
+    finally:
+        # 持有下层 async generator 并在退出时关闭（幂等）：
+        # 提前断连时触发半轮回滚与沙箱释放
+        if gen is not None:
+            with contextlib.suppress(Exception):
+                await gen.aclose()
+        runtime.unregister_task(task)
+
+    # 只有正常路径到达这里（取消/断连已在上方 re-raise）。
+    # done 只在正常完成时发：普通运行错误先发 error 再发 done。
+    if stream_error is not None:
+        yield _sse(stream_error)
+    yield _sse({"type": "done"})
+
+
+@app.get("/health", response_model=HealthResponse, response_model_exclude_none=True)
+async def health() -> HealthResponse:
+    return HealthResponse(status="ok")
 
 
 @app.get("/doctor")
@@ -240,12 +380,23 @@ async def doctor():
         }
 
 
-@app.get("/monitor/sessions")
-async def monitor_sessions():
-    """列出所有可监控的会话日志（logs/*.jsonl）。"""
+def _pagination(limit: int, page: list, next_cursor: str | None) -> PaginationMeta:
+    return PaginationMeta(
+        limit=limit, count=len(page),
+        has_more=next_cursor is not None, next_cursor=next_cursor,
+    )
+
+
+@app.get("/monitor/sessions", response_model=MonitorSessionsResponse, response_model_exclude_none=True)
+async def monitor_sessions(limit: int | None = None, cursor: str | None = None):
+    limit = max(1, min(int(limit), 500)) if limit is not None else None
+    """列出所有可监控的会话日志（logs/*.jsonl），支持稳定分页。
+
+    游标按 (mtime_ns, filename) 逆序；无 limit 时返回全量（兼容旧行为）。"""
     if not os.path.isdir(LOG_DIR):
-        return {"sessions": []}
-    sessions: list[dict] = []
+        return MonitorSessionsResponse(sessions=[])
+
+    entries: list[dict] = []
     for fname in os.listdir(LOG_DIR):
         if not fname.endswith(".jsonl"):
             continue
@@ -256,94 +407,249 @@ async def monitor_sessions():
             st = os.stat(path)
         except OSError:
             continue
-        sessions.append({
+        entries.append({
             "thread_id": fname[:-6],
             "size_bytes": st.st_size,
             "last_modified": st.st_mtime,
+            "mtime_ns": st.st_mtime_ns,
         })
-    sessions.sort(key=lambda s: s["last_modified"], reverse=True)
-    return {"sessions": sessions}
+    # (mtime_ns, filename) 逆序：相同 mtime 下顺序稳定
+    entries.sort(key=lambda s: (s["mtime_ns"], s["thread_id"]), reverse=True)
+
+    if cursor:
+        data = decode_cursor(cursor, "monitor_sessions",
+                             {"mtime_ns": int, "thread_id": str})
+        pos = (data["mtime_ns"], data["thread_id"])
+        entries = [e for e in entries if (e["mtime_ns"], e["thread_id"]) < pos]
+
+    next_raw = None
+    if limit is not None:
+        page = entries[:limit]
+        has_more = len(entries) > limit
+        if has_more and page:
+            last = page[-1]
+            next_raw = encode_cursor("monitor_sessions", {
+                "mtime_ns": last["mtime_ns"], "thread_id": last["thread_id"],
+            })
+        return MonitorSessionsResponse(
+            sessions=page, pagination=_pagination(limit, page, next_raw)
+        )
+
+    return MonitorSessionsResponse(sessions=entries)
 
 
-@app.get("/monitor/events/{thread_id}")
-async def monitor_events(thread_id: str):
-    """返回指定会话的审计事件流（解析后的 JSON 列表）。"""
+@app.get("/monitor/events/{thread_id}", response_model=MonitorEventsResponse, response_model_exclude_none=True)
+async def monitor_events(thread_id: str, limit: int | None = None,
+                         cursor: str | None = None):
+    limit = max(1, min(int(limit), 1000)) if limit is not None else None
+    """返回指定会话的审计事件流（解析后的 JSON 列表）。
+
+    分页语义（tail-follow）：无 cursor 时从文件尾读最近 limit 条，返回的
+    next_cursor 是读到的文件尾偏移，之后每次调用只读其后新增行（翻到文
+    件尾为止）。文件被截断（大小小于游标）→ 400 invalid_cursor，前端应
+    刷新第一页。单行超过大小上限的坏行跳过。"""
     path = os.path.join(LOG_DIR, f"{_safe_id(thread_id)}.jsonl")
     if not os.path.isfile(path):
-        return {"events": []}
-    events: list[dict] = []
+        return MonitorEventsResponse(events=[])
+
+    offset: int | None = None
+    if cursor:
+        data = decode_cursor(cursor, "monitor_events", {"offset": int})
+        offset = data["offset"]
+
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+        file_size = os.path.getsize(path)
     except OSError:
-        return {"events": []}
-    return {"events": events}
+        return MonitorEventsResponse(events=[])
+
+    if offset is not None and offset > file_size:
+        # 文件截断/轮转：游标越界
+        raise InvalidCursorError("monitor file truncated below cursor offset")
+
+    max_line = 256 * 1024  # 单行大小上限：超长的坏行跳过
+
+    def _parse(raw_lines) -> tuple[list[dict], int]:
+        """解析行（跳过坏行/超长行），返回 (events, 消费字节数)。"""
+        parsed: list[dict] = []
+        consumed = 0
+        for raw in raw_lines:
+            consumed += len(raw) + 1  # +1 换行
+            line = raw.strip()
+            if not line or len(line) > max_line:
+                continue
+            with contextlib.suppress(json.JSONDecodeError):
+                parsed.append(json.loads(line))
+        return parsed, consumed
+
+    if offset is not None:
+        # 只读 offset 之后的新增行（最多 limit 条）
+        with open(path, "rb") as f:
+            f.seek(offset)
+            raw = f.read()
+        lines = raw.splitlines()
+        take = lines[:limit] if limit is not None else lines
+        events, consumed = _parse(take)
+        new_offset = offset + consumed
+        has_more = new_offset < file_size
+        next_raw = (
+            encode_cursor("monitor_events", {"offset": new_offset})
+            if has_more else None
+        )
+        return MonitorEventsResponse(
+            events=events, pagination=_pagination(limit or 0, events, next_raw)
+        )
+
+    if limit is None:
+        # 全量（兼容旧行为）
+        with open(path, "rb") as f:
+            raw = f.read()
+        events, _ = _parse(raw.splitlines())
+        return MonitorEventsResponse(events=events)
+
+    # 无 cursor：从文件尾读最近 limit 条；next_cursor 指向本次文件尾，
+    # 供后续调用 tail-follow 新增事件
+    with open(path, "rb") as f:
+        chunks: list[bytes] = []
+        pos = file_size
+        scanned = 0
+        while pos > 0 and scanned < limit * max_line:
+            step = min(8192, pos)
+            pos -= step
+            f.seek(pos)
+            chunk = f.read(step)
+            chunks.insert(0, chunk)
+            scanned += step
+            if chunk.count(b"\n") >= limit:
+                break
+        tail = b"".join(chunks)
+    lines = tail.splitlines()
+    if tail and not tail.endswith(b"\n"):
+        lines = lines[1:]  # 丢弃可能被截断的首行
+    events, _ = _parse(lines[-limit:])
+    next_raw = encode_cursor("monitor_events", {"offset": file_size})
+    pagination = PaginationMeta(limit=limit, count=len(events),
+                                has_more=False, next_cursor=next_raw)
+    return MonitorEventsResponse(events=events, pagination=pagination)
 
 
-@app.get("/skills")
-async def list_skills():
-    """列出所有激活技能（名称/描述/四计数器/effective_rate）。"""
+@app.get("/skills", response_model=SkillsResponse, response_model_exclude_none=True)
+async def list_skills(limit: int | None = None, cursor: str | None = None):
+    limit = max(1, min(int(limit), 500)) if limit is not None else None
+    """列出所有激活技能（名称/描述/四计数器/effective_rate），支持稳定分页。
+
+    store 层按 (lower(name), skill_id) 排序；count 始终表示全部 active 数。"""
     try:
         store = get_skill_store()
-        recs = store.list_active()
+        total = await asyncio.to_thread(store.count_active)
+        if limit is not None:
+            cur = None
+            if cursor:
+                data = decode_cursor(cursor, "skills",
+                                     {"name": str, "skill_id": str})
+                cur = (data["name"], data["skill_id"])
+            recs, next_cur = await asyncio.to_thread(
+                store.list_active_page, limit, cur
+            )
+            next_raw = (
+                encode_cursor("skills", {"name": next_cur[0], "skill_id": next_cur[1]})
+                if next_cur else None
+            )
+            pagination = _pagination(limit, recs, next_raw)
+        else:
+            recs = await asyncio.to_thread(store.list_active)
+            pagination = None
+    except InvalidCursorError:
+        raise
     except Exception as exc:
         logger.exception("list skills failed")
-        return {"skills": [], "count": 0, "error": str(exc)}
+        return SkillsResponse(skills=[], count=0, error=str(exc))
 
-    skills = []
-    for r in recs:
-        skills.append({
-            "name": r.name,
-            "description": r.description,
-            "selections": r.total_selections,
-            "applied": r.total_applied,
-            "completions": r.total_completions,
-            "fallbacks": r.total_fallbacks,
-            "effective_rate": round(r.effective_rate, 3),
-            "enabled": r.enabled,
-            "is_active": r.is_active,
-        })
-    skills.sort(key=lambda s: s["name"])
-    return {"skills": skills, "count": len(skills)}
+    skills = [{
+        "name": r.name,
+        "description": r.description,
+        "selections": r.total_selections,
+        "applied": r.total_applied,
+        "completions": r.total_completions,
+        "fallbacks": r.total_fallbacks,
+        "effective_rate": round(r.effective_rate, 3),
+        "enabled": r.enabled,
+        "is_active": r.is_active,
+    } for r in recs]
+    return SkillsResponse(skills=skills, count=total, pagination=pagination)
 
 
-@app.get("/sessions")
-async def list_sessions():
-    """列出所有会话（供前端侧边栏）。
+@app.get("/sessions", response_model=SessionsResponse, response_model_exclude_none=True)
+async def list_sessions(limit: int | None = None, cursor: str | None = None):
+    limit = max(1, min(int(limit), 500)) if limit is not None else None
+    """列出所有会话（供前端侧边栏），支持稳定分页。
 
-    Phase 4：走 store 的稳定分页 API（一条 JOIN/页，无 N+1），
-    这里循环取完所有页保持侧边栏完整；响应形状与旧 list_threads 一致。"""
+    Phase 4/5：走 store 的稳定分页 API（一条 JOIN/页，无 N+1）；无 limit
+    时循环取完所有页（兼容旧行为），响应形状保持 {"sessions": [...]}。"""
     try:
         store = get_history_store()
+        if limit is not None:
+            cur = None
+            if cursor:
+                data = decode_cursor(cursor, "sessions",
+                                     {"last_id": int, "thread_id": str})
+                cur = (data["last_id"], data["thread_id"])
+            page, next_cur = await asyncio.to_thread(
+                store.list_thread_page, limit, cur
+            )
+            next_raw = (
+                encode_cursor("sessions", {
+                    "last_id": next_cur[0], "thread_id": next_cur[1],
+                }) if next_cur else None
+            )
+            return SessionsResponse(
+                sessions=page, pagination=_pagination(limit, page, next_raw)
+            )
         items: list[dict] = []
-        cursor = None
+        cur = None
         while True:
-            page, cursor = await asyncio.to_thread(
-                store.list_thread_page, 100, cursor
+            page, cur = await asyncio.to_thread(
+                store.list_thread_page, 100, cur
             )
             items.extend(page)
-            if cursor is None:
+            if cur is None:
                 break
-        return {"sessions": items}
+        return SessionsResponse(sessions=items)
+    except InvalidCursorError:
+        raise
     except Exception:
-        return {"sessions": []}
+        return SessionsResponse(sessions=[])
 
 
-@app.get("/history/{thread_id}")
-async def get_history(thread_id: str):
-    """返回某会话的消息历史（供前端切换会话时加载）。"""
+@app.get("/history/{thread_id}", response_model=HistoryResponse, response_model_exclude_none=True)
+async def get_history(thread_id: str, limit: int | None = None,
+                      cursor: str | None = None):
+    limit = max(1, min(int(limit), 1000)) if limit is not None else None
+    """返回某会话的消息历史（供前端切换会话时加载），支持稳定分页。
+
+    无 limit 时全量加载（兼容旧行为）；有 limit 时走 load_message_page，
+    游标为数据库原始行 id（含 tool 行），tool-only 页也能推进。"""
     try:
         store = get_history_store()
-        msgs = await asyncio.to_thread(store.load_messages, thread_id)
+        if limit is not None:
+            before = None
+            if cursor:
+                data = decode_cursor(cursor, "history", {"before_id": int})
+                before = data["before_id"]
+            msgs, next_cur = await asyncio.to_thread(
+                store.load_message_page, thread_id, limit, before
+            )
+            next_raw = (
+                encode_cursor("history", {"before_id": next_cur})
+                if next_cur is not None else None
+            )
+            pagination = _pagination(limit, msgs, next_raw)
+        else:
+            msgs = await asyncio.to_thread(store.load_messages, thread_id)
+            pagination = None
+    except InvalidCursorError:
+        raise
     except Exception:
-        return {"messages": []}
+        return HistoryResponse(messages=[])
 
     items: list[dict] = []
     for m in msgs:
@@ -361,23 +667,24 @@ async def get_history(thread_id: str):
             "content": content,
             "tools": tools,
         })
-    return {"messages": items}
+    return HistoryResponse(messages=items, pagination=pagination)
 
 
-@app.delete("/sessions/{thread_id}")
-async def delete_session(thread_id: str):
-    """删除指定会话（前端侧边栏删除按钮）。"""
+@app.delete("/sessions/{thread_id}", response_model=DeleteResponse, response_model_exclude_none=True)
+async def delete_session(thread_id: str) -> DeleteResponse:
+    """删除指定会话（前端侧边栏删除按钮）。未知 thread 幂等返回 ok。"""
     try:
-        # 与流式对话共用锁：避免正在结束的 Agent 在删除后把旧状态重新落盘。
-        async with _chat_lock:
-            if _agent is not None:
-                # Phase 3：走 Agent 的按 thread 互斥删除（等待在飞轮次结束）
-                await _agent.aclear_conversation(thread_id)
-            else:
-                await asyncio.to_thread(get_history_store().clear_thread, thread_id)
-        return {"status": "ok"}
+        # Phase 3：Agent 的按 thread 互斥删除（等待在飞轮次结束）。
+        # Phase 5：全局 chat 锁已移除，同 thread 互斥由协调器保证。
+        runtime = get_runtime()
+        agent = runtime.agent_if_ready()
+        if agent is not None:
+            await agent.aclear_conversation(thread_id)
+        else:
+            await asyncio.to_thread(runtime.get_history_store().clear_thread, thread_id)
+        return DeleteResponse(status="ok")
     except Exception as exc:
-        return {"status": "error", "message": str(exc)}
+        return DeleteResponse(status="error", message=str(exc))
 
 
 # 静态文件（前端 index.html）最后挂载，避免拦截 /chat /health

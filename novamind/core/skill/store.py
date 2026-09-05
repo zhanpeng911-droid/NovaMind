@@ -169,6 +169,41 @@ class SQLiteSkillStore:
             rows = self._conn.execute("SELECT * FROM skill_records WHERE is_active=1").fetchall()
             return [self._row_to_record(r) for r in rows]
 
+    def count_active(self) -> int:
+        """全部激活技能数（分页响应的 count 语义保持全量）。"""
+        with self._mu:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM skill_records WHERE is_active=1"
+            ).fetchone()
+            return int(row[0]) if row else 0
+
+    def list_active_page(
+        self, limit: int = 50, cursor: tuple[str, str] | None = None
+    ) -> tuple[list[SkillRecord], tuple[str, str] | None]:
+        """按 (lower(name), skill_id) 升序稳定分页列出激活技能。
+
+        cursor=(last_lower_name, last_skill_id)；返回 (records, next_cursor)，
+        next_cursor=None 表示没有更多。排序不依赖时间戳，顺序稳定。"""
+        limit = max(1, int(limit))
+        with self._mu:
+            params: list = []
+            query = "SELECT * FROM skill_records WHERE is_active=1"
+            if cursor is not None:
+                last_name, last_id = cursor
+                query += " AND (lower(name) > ? OR (lower(name) = ? AND skill_id > ?))"
+                params.extend([last_name.lower(), last_name.lower(), last_id])
+            query += " ORDER BY lower(name), skill_id LIMIT ?"
+            params.append(limit + 1)
+            rows = self._conn.execute(query, params).fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        records = [self._row_to_record(r) for r in rows]
+        next_cursor = (
+            (records[-1].name.lower(), records[-1].skill_id)
+            if has_more and records else None
+        )
+        return records, next_cursor
+
     def set_enabled(self, skill_id: str, enabled: bool) -> bool:
         with self._mu:
             cur = self._conn.execute("UPDATE skill_records SET enabled=? WHERE skill_id=?", (1 if enabled else 0, skill_id))
