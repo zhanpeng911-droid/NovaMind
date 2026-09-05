@@ -448,6 +448,10 @@
   }
   #stop:hover { filter: brightness(1.15); }
   #stop:disabled { color: var(--faint); cursor: not-allowed; }
+  .msg-note {
+    font-family: var(--mono); font-size: 11px; color: var(--warn, #d9822b);
+    margin-top: 6px;
+  }
   .load-more, .load-earlier {
     font-family: var(--mono); font-size: 11px; color: var(--teal);
     cursor: pointer; padding: 8px 12px; text-align: center;
@@ -846,6 +850,13 @@
       const body = document.createElement('div');
       body.innerHTML = renderMarkdown(m.content || '');
       el.appendChild(body);
+      if (m.note) {
+        // 终态提示（已停止 / 运行错误）随消息状态持久化，重绘不丢
+        const note = document.createElement('div');
+        note.className = 'msg-note';
+        note.textContent = m.note;
+        el.appendChild(note);
+      }
       if (m.role === 'ai') addCopyBtn(el, () => m.content || '');
       messagesEl.appendChild(el);
     });
@@ -932,6 +943,7 @@
     const tools = [];
     const chunks = [];
     let aborted = false;
+    let errorText = null;
 
     try {
       const resp = await fetch('/chat', {
@@ -1009,18 +1021,20 @@
       }
     } catch (err) {
       aborted = err.name === 'AbortError';
-      const seg = document.createElement('span');
-      seg.textContent = aborted
+      errorText = aborted
         ? '⏹ 已停止（本轮已取消并回滚）'
         : '连接失败: ' + err.message;
+      const seg = document.createElement('span');
+      seg.textContent = errorText;
       if (ensureAttached()) aiEl.insertBefore(seg, aiBody);
     } finally {
       cursorEl.remove();
       if (chunks.length) addCopyBtn(aiEl, () => chunks.join(''));
       st.running = false;
       st.abortController = null;
-      if (chunks.length || tools.length || aborted) {
-        st.messages.push({ role: 'ai', content: chunks.join(''), tools });
+      if (chunks.length || tools.length || errorText) {
+        // 终态（含停止/错误提示）写入会话状态：切换/重绘后仍然可见
+        st.messages.push({ role: 'ai', content: chunks.join(''), tools, note: errorText });
       }
       if (sessionId === currentId) { renderMessages(); refreshRunUI(); }
       renderSessions();
@@ -1087,9 +1101,15 @@
       panelEl.innerHTML = '<div class="panel-error">加载监控失败：' + escapeHtml(e.message) + '</div>';
     }
   }
-  async function fetchEvents(threadId) {
+  let monitorEventsCache = [];
+  async function fetchEvents(threadId, cursor) {
+    // Phase 6：默认有界读取（尾页 200 条），游标 tail-follow 增量拉取
     try {
-      const data = await fetchJson('/monitor/events/' + encodeURIComponent(threadId));
+      let url = '/monitor/events/' + encodeURIComponent(threadId) + '?limit=200';
+      if (cursor) url += '&cursor=' + encodeURIComponent(cursor);
+      const data = await fetchJson(url);
+      pageState.monitorEvents.cursor = (data.pagination && data.pagination.next_cursor) || null;
+      pageState.monitorEvents.hasMore = !!(data.pagination && data.pagination.has_more);
       return data.events || [];
     } catch (e) { return []; }
   }
@@ -1124,7 +1144,7 @@
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
       ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
-  async function renderMonitor() {
+  async function renderMonitor(resetEvents = true) {
     let msHtml = monitorSessions.map(s =>
       '<div class="ms-item' + (s.thread_id === monitorActiveId ? ' active' : '') + '" data-tid="' + escapeHtml(s.thread_id) + '">' +
       escapeHtml(s.thread_id) + '<div class="ms-size">' + (s.size_bytes / 1024).toFixed(1) + ' KB</div></div>'
@@ -1133,7 +1153,13 @@
       msHtml += '<div class="load-more" id="monitor-load-more">加载更多…</div>';
     }
 
-    const events = await fetchEvents(monitorActiveId);
+    if (resetEvents) {
+      monitorEventsCache = await fetchEvents(monitorActiveId);
+    } else {
+      const newer = await fetchEvents(monitorActiveId, pageState.monitorEvents.cursor);
+      monitorEventsCache = monitorEventsCache.concat(newer);
+    }
+    const events = monitorEventsCache;
     let evHtml = '';
     if (!events.length) {
       evHtml = '<div class="panel-empty">该会话暂无事件。</div>';
@@ -1144,6 +1170,10 @@
           '<span class="event-type">' + eventLabel(e.event) + '</span>' +
           '<span class="event-detail">' + escapeHtml(eventDetail(e)) + '</span></div>';
       });
+      if (pageState.monitorEvents.cursor) {
+        // tail-follow：服务端还有此前未读进来的增量
+        evHtml += '<div class="load-more" id="events-load-more">加载更新…</div>';
+      }
     }
 
     panelEl.innerHTML = '<div class="panel-header"><span class="bar">❯</span> 监控面板 <span class="count">' + monitorSessions.length + ' LOGS</span></div>' +
@@ -1160,6 +1190,8 @@
     });
     const more = panelEl.querySelector('#monitor-load-more');
     if (more) more.addEventListener('click', () => loadMonitor(false));
+    const evMore = panelEl.querySelector('#events-load-more');
+    if (evMore) evMore.addEventListener('click', () => renderMonitor(false));
   }
 
   let skillsCache = [];

@@ -86,23 +86,33 @@ class TestHistoryEndpoint(unittest.TestCase):
         ai_item = next(m for m in msgs if m["role"] == "ai")
         self.assertEqual(ai_item["tools"], ["calculator"])
 
-    def test_store_failure_returns_empty_messages(self):
+    def test_store_failure_returns_structured_500(self):
+        """加固收尾：存储故障返回结构化 5xx，不再伪装 200 空数据，
+        且不泄露原始异常文本（未知 thread 本身不抛错，仍 200 空列表）。"""
+        # 原始异常走 ServerErrorMiddleware（生产 uvicorn 返回 500 响应；
+        # TestClient 需关闭 raise_server_exceptions 才能看到响应体）
+        client = TestClient(app, raise_server_exceptions=False)
         with patch("novamind.webui.server.get_history_store",
-                   side_effect=RuntimeError("db down")):
-            resp = self.client.get("/history/t1")
-        self.assertEqual(resp.json(), {"messages": []})
+                   side_effect=RuntimeError("db down secret/path/x")):
+            resp = client.get("/history/t1")
+        self.assertEqual(resp.status_code, 500)
+        err = resp.json()["error"]
+        self.assertEqual(set(err.keys()), {"code", "message", "request_id"})
+        self.assertNotIn("db down", err["message"])
 
 
 class TestSkillsEndpointError(unittest.TestCase):
-    def test_store_exception_returns_error_payload_not_500(self):
+    def test_store_exception_returns_structured_500(self):
+        """加固收尾：技能库存储故障返回结构化 5xx，不再伪装 200 空数据
+        （契约自 2026-09 收尾轮起从「200+error 字段」演进为「5xx 统一形状」）。"""
         client = TestClient(app)
         with patch("novamind.webui.server.get_skill_store",
                    side_effect=RuntimeError("skill db locked")):
             resp = client.get("/skills")
-        self.assertEqual(resp.status_code, 200)
-        body = resp.json()
-        self.assertEqual(body["skills"], [])
-        self.assertIn("error", body)
+        self.assertEqual(resp.status_code, 500)
+        err = resp.json()["error"]
+        self.assertEqual(set(err.keys()), {"code", "message", "request_id"})
+        self.assertNotIn("skill db locked", err["message"])
 
 
 class TestWaitForServer(unittest.TestCase):

@@ -348,12 +348,14 @@ class TestSkillsEndpoint(unittest.TestCase):
         self.assertEqual(result["skills"][0]["effective_rate"], 0.6)
 
     def test_list_skills_handles_error(self):
+        """存储故障抛 HTTPException(500)，文案稳定且不含异常文本。"""
         with mock.patch(
             "novamind.webui.server.get_skill_store", side_effect=RuntimeError("db locked")
         ):
-            result = asyncio.run(list_skills()).model_dump()
-        self.assertEqual(result["count"], 0)
-        self.assertIn("db locked", result["error"])
+            with self.assertRaises(Exception) as ctx:
+                asyncio.run(list_skills())
+        self.assertIn("技能库暂不可用", str(ctx.exception))
+        self.assertNotIn("db locked", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@
 
 ## 一、一句话快照
 
-**663 个常规自动化测试（unit + integration）全绿，覆盖 82.6%、CI 底线 78；八阶段加固计划（Phase 0-7）全部落地：沙箱三组件接入默认 Agent 链路（fail closed）、per-thread 并发/取消回滚、SQLite 原子批量写入与稳定分页、WebRuntime 生命周期 + loopback-only + 统一 API 边界、前端按会话隔离。真实环境 smoke：真实 LLM office write/read/list 全链路、GUI 双 thread 并发、真实 LLM SSE 对话均通过。Docker 模式如实标记"组件存在、未实测"（无镜像定义），opt-in smoke 已就位。**
+**672 个常规自动化测试（unit + integration，全量收集含 functional 为 709）全绿，覆盖 82.6%、CI 底线 78；八阶段加固计划（Phase 0-7）主体完成，收尾审查发现的 6 项缺陷（after_agent 重复执行、快照浅拷贝残留、Web 错误泄露、monitor events 无界读取、OpenAPI 缺口、前端终态丢失）已在本轮全部修复并附回归测试：沙箱三组件接入默认 Agent 链路（fail closed）、per-thread 并发/取消回滚、SQLite 原子批量写入与稳定分页、WebRuntime 生命周期 + loopback-only + 统一 API 边界、前端按会话隔离。真实环境 smoke：真实 LLM office write/read/list 全链路、GUI 双 thread 并发、真实 LLM SSE 对话均通过。Docker 模式如实标记"组件存在、未实测"（无镜像定义），opt-in smoke 已就位。**
 
 一次跑完全部：
 ```bash
@@ -39,7 +39,7 @@ tests/
 | GitHub Actions 矩阵 | Python 3.12/3.13，`uv sync --locked`（依赖不漂移） |
 | CI 覆盖底线 | `--cov-fail-under=78`，只升不降 |
 | ruff | `E4/E7/E9/F + B`（bugbear）全清零，CI 强制 |
-| mypy | 两批 15 文件零错误，typecheck job 已转必需 |
+| mypy | 两批共 10 文件零错误，typecheck job 已转必需 |
 | pre-commit | ruff 提交前 + unit 冒烟推送前 |
 | branch protection | 必需 Pytest(3.12/3.13)+Ruff，管理员直推保留 |
 | 依赖清单 | 唯一事实源 `pyproject.toml`；`requirements.txt` 由 `uv export` 再生 |
@@ -131,7 +131,7 @@ tests/
 | 真实 LLM 用例 | **19/19** 全过（DeepSeek，每轮 ~2 分钟） |
 | 总覆盖率 | **81%**，CI 底线 **78** |
 | ruff | 0 错误（含 bugbear B 类） |
-| mypy | 15 文件零错误，typecheck 强制 |
+| mypy | 10 文件零错误（两批），typecheck 强制 |
 | 运行时缺陷存量 | 2 已修复 / 3 环境或留观 |
 
 ---
@@ -200,7 +200,9 @@ uv run --no-sync mypy novamind/core/policy.py novamind/core/token_tracker.py \
 | 6 前端隔离 | `6145ac2` | 按会话隔离状态 + 请求 token 丢弃晚到帧 + STOP 按钮 + fetchJson + 分页 UI（加载更早/加载更多） | 663 过 |
 | 7 收尾 | 本提交 | docs/webui-api.md + 三状态文档标记 + README 实测化 + Docker opt-in smoke + mypy 第二批 | 门禁见下 |
 
-最终门禁（CI 同款命令实测）：`pytest tests -q --cov=novamind --cov-fail-under=78` → **663 passed / 82.6%**；`ruff check novamind entry tests` → 0 错误；mypy 两批 10 文件 → 0 错误；`git diff --check` → 干净。
+最终门禁（CI 同款命令实测）：`pytest tests -q --cov=novamind --cov-fail-under=78` → **672 passed / 82.6%**；`ruff check novamind entry tests` → 0 错误；mypy 两批 10 文件 → 0 错误；`git diff --check` → 干净。
+
+收尾审查修复轮（2026-09-05）：一次性收尾状态机（after 钩子/持久化异常也回滚且不再重复分发）、快照深拷贝嵌套 metadata、SSE/doctor/skills/delete 不再泄露原始异常文本、sessions/history/skills 存储故障改结构化 5xx、monitor events 有界读取 + 前端 tail-follow 接入、OpenAPI 修正（/chat 200 仅 SSE、/doctor 真 schema、错误模型入路由）、前端停止/错误终态持久化。回归测试 +9 项。
 
 真实环境 smoke（本机，DeepSeek）：
 - CLI 默认模型 office 全链路：LLM 连续调用 write_office_file / read_office_file / list_office_file 各一次，写→读→列内容一致 ✅

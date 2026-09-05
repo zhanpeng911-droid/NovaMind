@@ -100,6 +100,19 @@ class MonitorSessionItem(BaseModel):
     mtime_ns: int
 
 
+class DoctorFinding(BaseModel):
+    level: str
+    code: str
+    message: str
+    suggestion: str | None = None
+
+
+class DoctorResponse(BaseModel):
+    ok: bool
+    counts: dict[str, int]
+    findings: list[DoctorFinding]
+
+
 class MonitorSessionsResponse(BaseModel):
     sessions: list[MonitorSessionItem]
     pagination: PaginationMeta | None = None

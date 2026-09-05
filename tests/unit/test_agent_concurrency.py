@@ -16,6 +16,7 @@ import unittest
 
 from langchain_core.messages import AIMessage
 
+from novamind.core.middlewares import MiddlewareManager
 from novamind.core.state_machine import AgentState, ConversationStore, NovaMindAgent
 
 
@@ -233,6 +234,119 @@ class TestCancelRollback(unittest.TestCase):
             await slow
 
         asyncio.run(_run())
+
+
+
+
+class TestFinalizationOnceAndRollback(unittest.TestCase):
+    """加固收尾回归：after 钩子/持久化阶段失败时——
+
+    - after_agent 恰好尝试一次（不再被 finally 重复分发）；
+    - 本轮状态（含嵌套 metadata）回滚到轮次开始前。"""
+
+    def _make_agent_with(self, middlewares, node_fn=None, **kwargs):
+        agent = NovaMindAgent(
+            middleware_manager=MiddlewareManager(middlewares), **kwargs
+        )
+
+        async def default_node(state):
+            return {"messages": [_mkmsg("reply")]}
+
+        agent.add_node("agent", node_fn or default_node)
+        agent.add_conditional_edge("agent", lambda s: "__end__", {"__end__": "__end__"})
+        return agent
+
+    def test_after_hook_failure_dispatches_once_and_rolls_back(self):
+        """对应审查复现：after_calls 必须为 1，失败后消息回到轮次前。"""
+        import asyncio as _aio
+
+        calls = {"after": 0}
+
+        class ExplodingAfter:
+            async def aafter_agent(self, ctx):
+                calls["after"] += 1
+                raise RuntimeError("after hook exploded")
+
+        agent = self._make_agent_with([ExplodingAfter()])
+
+        async def _run():
+            with self.assertRaises(RuntimeError):
+                await agent.run("hi", thread_id="t_after_fail")
+
+        _aio.run(_run())
+        self.assertEqual(calls["after"], 1, "after_agent 不得被重复分发")
+        state = agent._states["t_after_fail"]
+        self.assertEqual(
+            [m.content for m in state.messages], [],
+            "收尾失败后本轮消息（user/reply）必须回滚",
+        )
+
+    def test_nested_metadata_mutation_rolled_back_on_cancel(self):
+        """治理类中间件原地修改嵌套 dict（metadata['governance']['warned']），
+        取消后不得残留（快照必须深拷贝）。"""
+        import asyncio as _aio
+
+        class GovernanceLike:
+            async def abefore_model(self, ctx):
+                # 原地修改嵌套结构（不返回 state_patch）
+                gov = ctx.state.metadata.setdefault("governance", {})
+                gov["warned"] = True
+                return None
+
+        async def slow_node(state):
+            await _aio.sleep(5)
+            return {"messages": [_mkmsg("never")]}
+
+        agent = self._make_agent_with([GovernanceLike()], node_fn=slow_node)
+
+        async def _run():
+            task = _aio.create_task(agent.run("hi", thread_id="t_nested"))
+            await _aio.sleep(0.05)
+            task.cancel()
+            with contextlib.suppress(_aio.CancelledError):
+                await task
+
+        _aio.run(_run())
+        gov = agent._states["t_nested"].metadata.get("governance")
+        self.assertFalse(gov and gov.get("warned"), "嵌套 metadata 变更必须被回滚")
+
+    def test_persist_failure_rolls_back_and_restores_counts(self):
+        import asyncio as _aio
+        import os
+        import tempfile
+        from novamind.core.state_machine import ConversationStore
+
+        tmp = tempfile.mkdtemp(prefix="novamind_fix1_")
+        store = ConversationStore(db_path=os.path.join(tmp, "s.sqlite3"))
+
+        agent = self._make_agent_with([], conversation_store=store)
+        # _persist_state 直接打补丁模拟半程提交后失败
+        real_persist = agent._persist_state
+        calls = {"after": 0}
+
+        class AfterOK:
+            async def aafter_agent(self, ctx):
+                calls["after"] += 1
+
+        agent._middleware_manager.add_all([AfterOK()])
+
+        def broken_persist(tid, state):
+            real_persist(tid, state)  # 先真正写库（模拟半程提交）
+            raise RuntimeError("disk full")
+
+        agent._persist_state = broken_persist
+
+        async def _run():
+            with self.assertRaises(RuntimeError):
+                await agent.run("hi", thread_id="t_persist_fail")
+
+        _aio.run(_run())
+        self.assertEqual(calls["after"], 1, "持久化失败不得补发 after_agent")
+        state = agent._states["t_persist_fail"]
+        self.assertEqual([m.content for m in state.messages], [])
+        self.assertEqual(agent._persisted_counts.get("t_persist_fail", 0), 0,
+                         "持久化计数必须回滚到轮次前")
+        store.close()
 
 
 if __name__ == "__main__":

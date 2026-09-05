@@ -332,5 +332,82 @@ class TestPaginationEndpoints(unittest.TestCase):
             self.assertIsNone(page2["pagination"].get("next_cursor"))
 
 
+
+
+class TestOpenApiContractFixes(unittest.TestCase):
+    """加固收尾回归：OpenAPI 修正——/chat 200 仅 SSE、/doctor 真 schema、
+    集合路由声明统一错误模型。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.schema = app.openapi()
+
+    def test_chat_200_only_event_stream(self):
+        content = self.schema["paths"]["/chat"]["post"]["responses"]["200"]["content"]
+        self.assertEqual(set(content.keys()), {"text/event-stream"})
+
+    def test_doctor_has_real_schema(self):
+        s200 = self.schema["paths"]["/doctor"]["get"]["responses"]["200"]["content"]
+        schema = s200["application/json"]["schema"]
+        ref = schema.get("$ref", "")
+        self.assertIn("DoctorResponse", ref)
+        model = self.schema["components"]["schemas"]["DoctorResponse"]
+        self.assertEqual(set(model["properties"].keys()), {"ok", "counts", "findings"})
+
+    def test_collection_routes_declare_error_model(self):
+        for path in ("/sessions", "/history/{thread_id}", "/skills",
+                     "/monitor/sessions", "/monitor/events/{thread_id}"):
+            op = self.schema["paths"][path]["get"]
+            self.assertIn("400", op["responses"], path)
+            self.assertIn("ErrorResponse", str(op["responses"]["400"]), path)
+            self.assertIn("ErrorResponse", str(op["responses"]["500"]), path)
+
+
+class TestSseErrorFrameNoLeak(unittest.TestCase):
+    def test_error_frame_is_stable_without_exception_text(self):
+        class ExplodingAgent:
+            def astream(self, message, thread_id=None):
+                async def _gen():
+                    yield {"agent": {"messages": [AIMessage(content="x")]}}
+                    raise RuntimeError("secret provider sk-abc failed at C:/path")
+                return _gen()
+
+        async def _run():
+            with patch("novamind.webui.server.get_agent",
+                       return_value=ExplodingAgent()):
+                frames = []
+                async for frame in _stream_chat(
+                    type("Req", (), {"message": "hi", "thread_id": "t"})()
+                ):
+                    frames.append(frame)
+                return frames
+
+        frames = asyncio.run(_run())
+        payloads = [json.loads(f.removeprefix("data: ").strip())
+                    for f in frames if f.strip()]
+        err = next(p for p in payloads if p["type"] == "error")
+        self.assertEqual(err["code"], "internal_error")
+        self.assertEqual(set(err.keys()),
+                         {"type", "code", "message", "request_id"})
+        self.assertNotIn("secret", err["message"])
+        self.assertNotIn("sk-abc", err["message"])
+
+
+class TestFrontendHardeningStatic(unittest.TestCase):
+    """前端加固的静态断言（无浏览器环境下的最小验收）。"""
+
+    def test_events_fetch_is_bounded_and_follow_cursor(self):
+        page = open("novamind/webui/static/index.html", encoding="utf-8").read()
+        self.assertIn("'?limit=200'", page, "monitor events 默认请求必须有界")
+        self.assertIn("pageState.monitorEvents.cursor", page, "必须使用分页游标")
+        self.assertIn("加载更新", page, "必须有 tail-follow 增量按钮")
+
+    def test_terminal_note_persists_in_state(self):
+        page = open("novamind/webui/static/index.html", encoding="utf-8").read()
+        self.assertIn("note: errorText", page, "停止/错误提示必须写入消息状态")
+        self.assertIn("if (m.note)", page, "渲染必须回放终态提示")
+        self.assertIn("id=\"stop\"", page, "STOP 按钮必须存在")
+
+
 if __name__ == "__main__":
     unittest.main()

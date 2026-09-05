@@ -11,6 +11,7 @@ NovaMind 自定义状态机引擎
 """
 from __future__ import annotations
 import asyncio
+import copy
 import json
 import os
 import threading
@@ -716,16 +717,22 @@ class NovaMindAgent:
         thread_id: str,
         max_iterations: int,
     ) -> AgentState:
-        """轮次主体：快照 → 循环 → 收尾/回滚（状态已获取并 pin）。"""
+        """轮次主体：快照 → 循环 → 收尾/回滚（状态已获取并 pin）。
+
+        收尾编排是一次性状态机（turn_done / finalized 两个阶段标记）：
+        - 轮次本体（before/循环）失败 → 回滚 + finally 补发 after（资源释放）；
+        - 收尾阶段（after 钩子 / 持久化）失败 → 回滚本轮，after 不再补发
+          （已经执行过或正在失败中），杜绝重复执行收尾钩子。
+        """
         snapshot = self._snapshot_state(state)
+        counts_before = self._persisted_counts.get(thread_id, 0)
         user_msg = HumanMessage(content=user_input, id=f"msg_{uuid.uuid4().hex[:12]}")
         state.add_message(user_msg)
         self._mark_pending_persist(state, [user_msg])
         state.metadata["iteration"] = 0
 
-        # after_agent 恰好一次保证：正常收尾在 try 内分发并置位；
-        # 异常/取消路径由 finally 补发（沙箱 release 等资源回收依赖此语义）。
-        after_dispatched = False
+        turn_done = False
+        finalized = False
         try:
             try:
                 # 分发 before_agent 钩子（记忆预载 / 沙箱恢复等横切关注点）。
@@ -780,22 +787,32 @@ class NovaMindAgent:
                             action=f"达到最大迭代次数 {max_iterations}，智能体循环终止",
                             iteration=state.metadata["iteration"],
                         )
+
+                turn_done = True
             except BaseException:
-                # 半轮失败/取消：回滚到轮次开始前（持久化尚未发生，无需补偿），
-                # 再由 finally 分发 after_agent 完成沙箱等资源释放。
+                # 半轮失败/取消：回滚到轮次开始前（持久化尚未发生）。
+                # turn_done 保持 False → finally 补发 after_agent 完成
+                # 沙箱等资源释放（恰好一次）。
                 self._rollback_state(state, snapshot)
                 raise
 
-            # 分发 after_agent 钩子（报告合成 / 反思等收尾关注点）
+            # 收尾阶段（turn_done=True）：after 钩子 / 持久化的失败同样
+            # 回滚本轮（见外层 except），且 finally 不再补发 after。
             await self._dispatch_hook("after_agent", state, thread_id)
-            after_dispatched = True
 
             # 持久化到数据库
             self._persist_state(thread_id, state)
+            finalized = True
 
             return state
+        except BaseException:
+            if turn_done and not finalized:
+                # 收尾失败：回滚本轮（含持久化计数快照，防半程提交后计数超前）
+                self._rollback_state(state, snapshot)
+                self._persisted_counts[thread_id] = counts_before
+            raise
         finally:
-            if not after_dispatched:
+            if not turn_done:
                 await self._dispatch_hook("after_agent", state, thread_id)
 
     async def astream(
@@ -832,14 +849,17 @@ class NovaMindAgent:
         try:
             state = self._get_or_create_state(thread_id)
             snapshot = self._snapshot_state(state)
+            counts_before = self._persisted_counts.get(thread_id, 0)
             user_msg = HumanMessage(content=user_input, id=f"msg_{uuid.uuid4().hex[:12]}")
             state.add_message(user_msg)
             self._mark_pending_persist(state, [user_msg])
             state.metadata["iteration"] = 0
 
-            # 与 run() 相同的 after_agent 恰好一次保证；astream 被提前 close
-            # （GeneratorExit）或取消时，finally 仍补发 after_agent 释放沙箱资源。
-            after_dispatched = False
+            # 与 run() 相同的一次性收尾状态机：astream 被提前 close
+            # （GeneratorExit）或取消时，finally 补发 after_agent 释放沙箱；
+            # 收尾阶段（after 钩子/持久化）失败则回滚且不补发。
+            turn_done = False
+            finalized = False
             try:
                 try:
                     # 分发 before_agent 钩子
@@ -896,48 +916,53 @@ class NovaMindAgent:
                             "max_iterations": max_iterations,
                             "iteration": state.metadata["iteration"],
                         }}
+
+                    turn_done = True
                 except BaseException:
                     # 半轮失败/消费者提前关闭：回滚到轮次开始前
                     self._rollback_state(state, snapshot)
                     raise
 
-                # 分发 after_agent 钩子
+                # 收尾阶段：after 钩子 / 持久化失败同样回滚（见外层 except）
                 await self._dispatch_hook("after_agent", state, thread_id)
-                after_dispatched = True
 
                 # 流式执行结束后持久化
                 state.metadata["visited_edges"] = visited_edges
                 self._persist_state(thread_id, state)
+                finalized = True
+            except BaseException:
+                if turn_done and not finalized:
+                    self._rollback_state(state, snapshot)
+                    self._persisted_counts[thread_id] = counts_before
+                raise
             finally:
-                if not after_dispatched:
+                if not turn_done:
                     await self._dispatch_hook("after_agent", state, thread_id)
         finally:
             self._running_threads.discard(thread_id)
 
     @staticmethod
     def _snapshot_state(state: AgentState) -> dict[str, Any]:
-        """轮次开始前的内存状态快照（浅拷贝 + pending 队列副本）。
+        """轮次开始前的内存状态快照。
 
-        metadata 只做顶层拷贝：run 期间对其的修改都是顶层键赋值/更新，
-        回滚时整体替换即可。"""
-        pending = state.metadata.get("_pending_persist_messages")
+        metadata 做深拷贝：治理等中间件会原地修改嵌套 dict（如
+        metadata["governance"]["warned"]），浅拷贝会让取消回滚后残留
+        嵌套变更。messages 列表拷贝引用（消息对象视为不可变）。"""
         return {
             "messages": list(state.messages),
             "summary": state.summary,
-            "metadata": dict(state.metadata),
-            "pending": list(pending) if pending else [],
+            "metadata": copy.deepcopy(state.metadata),
         }
 
     @staticmethod
     def _rollback_state(state: AgentState, snapshot: dict[str, Any]) -> None:
-        """半轮失败/取消：把内存状态恢复到轮次开始前。
+        """半轮失败/取消/收尾失败：把内存状态恢复到轮次开始前。
 
-        此刻持久化尚未发生（_persist_state 只在轮次成功后执行），
-        持久化计数无需补偿。"""
+        metadata 是轮次开始前的深拷贝（含 _pending_persist_messages），
+        整体替换即可。持久化计数由调用方按需恢复（收尾失败路径）。"""
         state.messages = list(snapshot["messages"])
         state.summary = snapshot["summary"]
-        state.metadata = dict(snapshot["metadata"])
-        state.metadata["_pending_persist_messages"] = list(snapshot["pending"])
+        state.metadata = copy.deepcopy(snapshot["metadata"])
 
     def clear_conversation(self, thread_id: str) -> None:
         """清除指定会话的所有数据（内存+数据库）。

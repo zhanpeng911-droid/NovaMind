@@ -24,16 +24,19 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel
 
 from novamind.core.config import LOG_DIR
 from novamind.core.state_machine import ConversationStore
 from novamind.webui.api_models import (
     DeleteResponse,
+    DoctorResponse,
+    ErrorResponse,
     HealthResponse,
     HistoryResponse,
     InvalidCursorError,
@@ -253,6 +256,19 @@ app = FastAPI(title="NovaMind WebUI", lifespan=_lifespan)
 app.add_middleware(BodyLimitMiddleware, limit=_BODY_LIMIT)
 
 
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """HTTPException → 统一错误形状（HTTPException(status, detail) 的 detail
+    是服务端可控文案，不含原始异常）。"""
+    codes = {
+        400: "bad_request", 404: "not_found", 405: "method_not_allowed",
+        413: "body_too_large", 415: "unsupported_media_type",
+    }
+    return _error_response(exc.status_code,
+                           codes.get(exc.status_code, "http_error"),
+                           str(exc.detail))
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request: Request, exc: RequestValidationError):
     """422：字段验证失败，统一错误形状（FastAPI 默认 detail 形状弃用）。"""
@@ -271,6 +287,21 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     return _error_response(500, "internal_error", "服务器内部错误")
 
 
+_ERROR_DESCRIPTIONS = {
+    400: "非法游标（invalid_cursor）",
+    413: "请求体过大",
+    415: "媒体类型不支持",
+    422: "字段验证失败",
+    500: "服务器内部错误",
+}
+
+
+def _error_responses(*codes: int) -> dict[int, dict]:
+    """给路由的 OpenAPI 声明补统一错误模型。"""
+    return {c: {"model": ErrorResponse, "description": _ERROR_DESCRIPTIONS[c]}
+            for c in codes}
+
+
 def _error_response(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(
         status_code=status,
@@ -282,6 +313,7 @@ def _error_response(status: int, code: str, message: str) -> JSONResponse:
 @app.post("/chat", responses={
     200: {"content": {"text/event-stream": {}},
           "description": "SSE 事件流（thread/tool/text/limit/error/done）"},
+    **_error_responses(413, 415, 422, 500),
 })
 async def chat(request: ChatRequest) -> StreamingResponse:
     return StreamingResponse(
@@ -336,9 +368,15 @@ async def _stream_chat(request: ChatRequest) -> AsyncIterator[str]:
         # 断连/停机：显式处理并 re-raise；finally 的 aclose 会取消本轮并
         # 回滚半轮状态，不向已死连接写 done。
         raise
-    except Exception as exc:
-        logger.exception("chat stream failed")
-        stream_error = {"type": "error", "message": str(exc)}
+    except Exception:
+        request_id = uuid.uuid4().hex
+        logger.exception("chat stream failed (request_id=%s)", request_id)
+        # 只发稳定信息，不泄露 provider/路径等内部细节（完整 traceback 留在服务端日志）
+        stream_error = {
+            "type": "error", "code": "internal_error",
+            "message": "服务器处理失败，请稍后重试",
+            "request_id": request_id,
+        }
     finally:
         # 持有下层 async generator 并在退出时关闭（幂等）：
         # 提前断连时触发半轮回滚与沙箱释放
@@ -359,14 +397,14 @@ async def health() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
-@app.get("/doctor")
+@app.get("/doctor", response_model=DoctorResponse)
 async def doctor():
     """架构健康体检：复用 novamind doctor 的分层自检，返回结构化报告。"""
     try:
         from novamind.core.doctor import run_doctor
 
         return run_doctor().as_dict()
-    except Exception as exc:
+    except Exception:
         logger.exception("doctor failed")
         return {
             "ok": False,
@@ -374,7 +412,7 @@ async def doctor():
             "findings": [{
                 "level": "error",
                 "code": "doctor_failed",
-                "message": str(exc),
+                "message": "诊断执行失败，请查看服务端日志",
                 "suggestion": "Check the server log for the full traceback.",
             }],
         }
@@ -387,7 +425,8 @@ def _pagination(limit: int, page: list, next_cursor: str | None) -> PaginationMe
     )
 
 
-@app.get("/monitor/sessions", response_model=MonitorSessionsResponse, response_model_exclude_none=True)
+@app.get("/monitor/sessions", response_model=MonitorSessionsResponse,
+         response_model_exclude_none=True, responses=_error_responses(400, 500))
 async def monitor_sessions(limit: int | None = None, cursor: str | None = None):
     limit = max(1, min(int(limit), 500)) if limit is not None else None
     """列出所有可监控的会话日志（logs/*.jsonl），支持稳定分页。
@@ -438,7 +477,8 @@ async def monitor_sessions(limit: int | None = None, cursor: str | None = None):
     return MonitorSessionsResponse(sessions=entries)
 
 
-@app.get("/monitor/events/{thread_id}", response_model=MonitorEventsResponse, response_model_exclude_none=True)
+@app.get("/monitor/events/{thread_id}", response_model=MonitorEventsResponse,
+         response_model_exclude_none=True, responses=_error_responses(400, 500))
 async def monitor_events(thread_id: str, limit: int | None = None,
                          cursor: str | None = None):
     limit = max(1, min(int(limit), 1000)) if limit is not None else None
@@ -532,7 +572,8 @@ async def monitor_events(thread_id: str, limit: int | None = None,
     return MonitorEventsResponse(events=events, pagination=pagination)
 
 
-@app.get("/skills", response_model=SkillsResponse, response_model_exclude_none=True)
+@app.get("/skills", response_model=SkillsResponse,
+         response_model_exclude_none=True, responses=_error_responses(400, 500))
 async def list_skills(limit: int | None = None, cursor: str | None = None):
     limit = max(1, min(int(limit), 500)) if limit is not None else None
     """列出所有激活技能（名称/描述/四计数器/effective_rate），支持稳定分页。
@@ -560,9 +601,10 @@ async def list_skills(limit: int | None = None, cursor: str | None = None):
             pagination = None
     except InvalidCursorError:
         raise
-    except Exception as exc:
+    except Exception:
         logger.exception("list skills failed")
-        return SkillsResponse(skills=[], count=0, error=str(exc))
+        raise HTTPException(status_code=500,
+                            detail="技能库暂不可用，请稍后重试") from None
 
     skills = [{
         "name": r.name,
@@ -578,7 +620,8 @@ async def list_skills(limit: int | None = None, cursor: str | None = None):
     return SkillsResponse(skills=skills, count=total, pagination=pagination)
 
 
-@app.get("/sessions", response_model=SessionsResponse, response_model_exclude_none=True)
+@app.get("/sessions", response_model=SessionsResponse,
+         response_model_exclude_none=True, responses=_error_responses(400, 500))
 async def list_sessions(limit: int | None = None, cursor: str | None = None):
     limit = max(1, min(int(limit), 500)) if limit is not None else None
     """列出所有会话（供前端侧边栏），支持稳定分页。
@@ -616,11 +659,11 @@ async def list_sessions(limit: int | None = None, cursor: str | None = None):
         return SessionsResponse(sessions=items)
     except InvalidCursorError:
         raise
-    except Exception:
-        return SessionsResponse(sessions=[])
+    # 存储故障不再伪装 200 空数组：向上传播由全局 handler 返回 500
 
 
-@app.get("/history/{thread_id}", response_model=HistoryResponse, response_model_exclude_none=True)
+@app.get("/history/{thread_id}", response_model=HistoryResponse,
+         response_model_exclude_none=True, responses=_error_responses(400, 500))
 async def get_history(thread_id: str, limit: int | None = None,
                       cursor: str | None = None):
     limit = max(1, min(int(limit), 1000)) if limit is not None else None
@@ -648,8 +691,8 @@ async def get_history(thread_id: str, limit: int | None = None,
             pagination = None
     except InvalidCursorError:
         raise
-    except Exception:
-        return HistoryResponse(messages=[])
+    # 存储故障不再伪装 200 空数组：向上传播由全局 handler 返回 500
+    # （未知 thread 本身不抛错，仍返回 200 空列表）
 
     items: list[dict] = []
     for m in msgs:
@@ -683,9 +726,37 @@ async def delete_session(thread_id: str) -> DeleteResponse:
         else:
             await asyncio.to_thread(runtime.get_history_store().clear_thread, thread_id)
         return DeleteResponse(status="ok")
-    except Exception as exc:
-        return DeleteResponse(status="error", message=str(exc))
+    except Exception:
+        logger.exception("delete session failed")
+        return DeleteResponse(status="error", message="删除会话失败，请稍后重试")
 
 
 # 静态文件（前端 index.html）最后挂载，避免拦截 /chat /health
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+
+
+def _custom_openapi() -> dict:
+    """修正 FastAPI 自动生成的 OpenAPI：
+
+    - /chat 的 200 只保留 text/event-stream（自动生成会把
+      application/json 与 SSE 并列）；
+    - 其余由路由 responses= 声明补齐错误模型。"""
+    if app.openapi_schema:
+        return app.openapi_schema
+    from fastapi.openapi.utils import get_openapi
+
+    schema = get_openapi(title=app.title, version=app.version,
+                         description=app.description, routes=app.routes)
+    chat_op = schema.get("paths", {}).get("/chat", {}).get("post")
+    if chat_op and "200" in chat_op.get("responses", {}):
+        sse_frame_hint = "SSE frame: data: {json}" + chr(92) + "n" + chr(92) + "n"
+        chat_op["responses"]["200"]["content"] = {
+            "text/event-stream": {
+                "schema": {"type": "string", "description": sse_frame_hint},
+            },
+        }
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _custom_openapi  # type: ignore[method-assign]

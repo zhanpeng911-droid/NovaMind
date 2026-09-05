@@ -52,7 +52,11 @@ FastAPI lifespan 持有 `WebRuntime`：
 | 413 | `body_too_large` | 请求体超限 |
 | 415 | `unsupported_media_type` | /chat 非 JSON |
 | 422 | `validation_error` | 字段验证失败 |
-| 500 | `internal_error` | 未处理异常（traceback 只留服务端日志） |
+| 500 | `internal_error` / `http_error` | 未处理异常、存储故障（traceback 只留服务端日志） |
+
+说明：sessions/history/skills 的存储故障返回结构化 5xx（不伪装 200 空数据）；
+未知 thread 本身不抛错，仍返回 200 空数组。`/doctor` 的执行失败保持 200 +
+结构化 fallback 报告（`ok:false` + `doctor_failed` finding），诊断语义不变。
 
 成功响应经 `response_model` 声明（`exclude_none`）；旧顶层字段全部保留，
 分页字段只新增不改名。未知 history/monitor 会话返回 200 空数组；删除未知
@@ -81,7 +85,9 @@ FastAPI lifespan 持有 `WebRuntime`：
 ## SSE 事件与断连语义 [已实测]
 
 `POST /chat` 返回 `text/event-stream`，帧类型：`thread` / `tool` / `text` /
-`limit` / `error` / `done`。
+`limit` / `error` / `done`。`error` 帧形状：
+`{"type":"error","code":"internal_error","message":"<稳定文案>","request_id":"..."}`
+——不含 provider/路径等内部细节，完整 traceback 只留服务端日志。
 
 - `done` 只在正常完成时发送；客户端断连（取消）不发 `done`；
 - 普通运行错误：先发 `error`（兼容旧 `message` 字段），再发 `done`；
