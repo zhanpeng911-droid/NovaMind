@@ -266,8 +266,9 @@ NovaMind/
 
 ```powershell
 uv sync --extra dev                          # 安装依赖（严格按 uv.lock）
-uv run --no-sync pytest tests -q             # 常规回归 672 个测试
-                                             # （全量收集含 functional 共 ~709；functional 属发布前手动门禁，缺 key 自动跳过）
+uv run --no-sync pytest tests -q             # 常规回归 698 个测试
+                                             # （全量收集含 functional 共 ~735；functional 属发布前手动门禁，缺 key 自动跳过）
+node --test tests/integration/chat_logic.test.js  # 前端 SSE 终态行为测试（收尾修复起接入 CI）
 uv run --no-sync pytest tests/unit -q        # 单元层
 uv run --no-sync pytest tests/integration -q # 集成/端到端层
 uv run --no-sync ruff check novamind entry tests   # Lint（CI 强制）

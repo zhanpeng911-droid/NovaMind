@@ -7,7 +7,7 @@
 
 ## 一、一句话快照
 
-**672 个常规自动化测试（unit + integration，全量收集含 functional 为 709）全绿，覆盖 82.6%、CI 底线 78；八阶段加固计划（Phase 0-7）主体完成，收尾审查发现的 6 项缺陷（after_agent 重复执行、快照浅拷贝残留、Web 错误泄露、monitor events 无界读取、OpenAPI 缺口、前端终态丢失）已在本轮全部修复并附回归测试：沙箱三组件接入默认 Agent 链路（fail closed）、per-thread 并发/取消回滚、SQLite 原子批量写入与稳定分页、WebRuntime 生命周期 + loopback-only + 统一 API 边界、前端按会话隔离。真实环境 smoke：真实 LLM office write/read/list 全链路、GUI 双 thread 并发、真实 LLM SSE 对话均通过。Docker 模式如实标记"组件存在、未实测"（无镜像定义），opt-in smoke 已就位。**
+**698 个常规自动化测试（unit + integration，全量收集含 functional 为 735）全绿，覆盖 82.9%、CI 底线 78；八阶段加固计划（Phase 0-7）主体完成，收尾审查 6 项缺陷已修复，第二轮收尾修复（Phase 1-4：事务原子性 / SSE 终态与删除契约 / 有界监控读取 / 门禁文档）全部落地：沙箱三组件接入默认 Agent 链路（fail closed）、per-thread 并发/取消回滚、SQLite 原子批量写入与稳定分页、WebRuntime 生命周期 + loopback-only + 统一 API 边界、前端按会话隔离。真实环境 smoke：真实 LLM office write/read/list 全链路、GUI 双 thread 并发、真实 LLM SSE 对话均通过。Docker 模式如实标记"组件存在、未实测"（无镜像定义），opt-in smoke 已就位。**
 
 一次跑完全部：
 ```bash
@@ -209,6 +209,19 @@ uv run --no-sync mypy novamind/core/policy.py novamind/core/token_tracker.py \
 - 双 thread 并发：两个 thread 同时 astream（真实 LLM），互不串话，合计 0.9s ✅
 - WebUI：lifespan 启动 + 真实 LLM SSE 对话（thread→text→done）+ 非 JSON 415 统一错误形状 ✅
 - GUI 非 loopback 绑定拒绝：单测覆盖（0.0.0.0/::/LAN IP/hostname）✅
+
+## 九、第二轮收尾修复记录（2026-09-05，Phase 1-4 全部完成）
+
+| Phase | 提交 | 内容 | 验证 |
+|---|---|---|---|
+| 1 事务原子性 | `e936aa1` | `ConversationStore.save_turn`（消息+摘要同事务）；`_persist_state` 改单次提交，成功后才推进计数；失败整批回滚 + 跨实例重载一致；nested metadata 执行型回归（节点真实 dispatch before_model 后取消） | 17 过 |
+| 2 终态与删除 | `b8432da` | 新增 `chat_logic.js` 纯 helper（createTurnState/applyFrame/setTerminalError/buildFinalMessage），SSE error→done 保存 note 重绘可见；DELETE 失败结构化 500（session_delete_failed，同 request_id）；aclear/clear 先删库成功再清内存；前端确认 status==='ok' 才移除 | Node 6 过 + 后端/前端契约测试 |
+| 3 有界监控读取 | `f85a855` | `event_reader.py` 二进制有界 JSONL 读取（块 8K/单行 256K/预算 2MiB，防 read(-1)，超长行不进内存）；monitor v2 cursor（offset+discarding，v1 兼容）；endpoint 默认 200/上限 1000/422，EOF 与空页保留游标；前端 token 防串会、增量防重入、缓存 2000 条、EOF 保留"检查更新" | 11 用例 + 端点契约 |
+| 4 门禁文档 | 本提交 | JS 测试接入 CI；webui-api/session-model/README/主报告更新（monitor 语义变更明确标注）；门禁实测 | 见下 |
+
+最终门禁（CI 同款命令实测）：`pytest tests -q --cov=novamind --cov-fail-under=78` → **698 passed / 82.9%**；`ruff check novamind entry tests` → 0 错误；mypy 两批 10 文件 → 0 错误；`git diff --check` → 干净；`node --test tests/integration/chat_logic.test.js` → 6 过。
+
+明确尚未验证的环境：真实浏览器点击验收（前端行为以 node 执行型测试 + 静态断言覆盖）；真实 Docker smoke（无镜像定义，opt-in 测试就位）。
 
 ## 九、附录索引（粒度细节在各子文档）
 

@@ -51,12 +51,15 @@ FastAPI lifespan 持有 `WebRuntime`：
 | 400 | `invalid_cursor` | 游标非法（版本/kind/字段类型/越界/文件截断） |
 | 413 | `body_too_large` | 请求体超限 |
 | 415 | `unsupported_media_type` | /chat 非 JSON |
-| 422 | `validation_error` | 字段验证失败 |
+| 422 | `validation_error` | 字段验证失败、非法 limit |
 | 500 | `internal_error` / `http_error` | 未处理异常、存储故障（traceback 只留服务端日志） |
+| 500 | `session_delete_failed` | DELETE /sessions/{id} 实际删除失败（同一 request_id 写日志并返回） |
 
 说明：sessions/history/skills 的存储故障返回结构化 5xx（不伪装 200 空数据）；
 未知 thread 本身不抛错，仍返回 200 空数组。`/doctor` 的执行失败保持 200 +
 结构化 fallback 报告（`ok:false` + `doctor_failed` finding），诊断语义不变。
+DELETE 只对**实际删除失败**返回 500；删除不存在的会话幂等 200
+`{"status":"ok"}`。前端收到成功响应并确认 `status==='ok'` 后才移除列表。
 
 成功响应经 `response_model` 声明（`exclude_none`）；旧顶层字段全部保留，
 分页字段只新增不改名。未知 history/monitor 会话返回 200 空数组；删除未知
@@ -67,25 +70,35 @@ FastAPI lifespan 持有 `WebRuntime`：
 - 格式：带版本的 base64url JSON：`{"v":"v1","k":"<kind>","d":{...}}`；
 - 严格校验：kind 必须匹配（防跨端点复用）、字段名精确匹配、类型严格
   （bool 不算 int）、长度 ≤ 512 字符；
-- `limit` 缺省时各端点保持旧行为（返回全量，响应不含 `pagination`）。
+- `limit` 缺省时各端点保持旧行为（返回全量，响应不含 `pagination`）；
+  **例外：`/monitor/events` 省略 limit 时默认 200**（自收尾修复起不再返回
+  全量，这是明确的响应语义变更）。
 
 | 端点 | kind | 游标字段 | 语义 |
 |---|---|---|---|
 | `/sessions` | `sessions` | `last_id`,`thread_id` | `(MAX(id), thread_id)` 逆序，稳定 |
 | `/history/{tid}` | `history` | `before_id` | 原始行 id（含 tool 行），tool-only 页可推进 |
 | `/monitor/sessions` | `monitor_sessions` | `mtime_ns`,`thread_id` | 逆序，相同 mtime 稳定 |
-| `/monitor/events/{tid}` | `monitor_events` | `offset` | 字节偏移 tail-follow（见下） |
+| `/monitor/events/{tid}` | `monitor_events_v2` | `offset`,`discarding` | 字节偏移 tail-follow（见下） |
 | `/skills` | `skills` | `name`,`skill_id` | `(lower(name), skill_id)` 升序；`count` 恒为全量 active 数 |
 
-`/monitor/events` 分页是 tail-follow：无 cursor 时从文件尾读最近 limit 条，
-返回的 `next_cursor` 是本次文件尾偏移；之后每次调用只读其后新增行。文件被
-截断（大小 < offset）→ 400 `invalid_cursor`，前端应刷新第一页。单行超过
-256KB 的坏行跳过。
+`/monitor/events` 分页（tail-follow，**有界读取**）：
+- 默认 limit=200，上限 1000，非法 limit → 422；
+- 无 cursor：从文件尾读最近 limit 条完整行；`next_cursor` 指向尾行起点
+  （EOF 与空页也返回），供后续增量读取；
+- 有 cursor（v2：`offset` + `discarding` 状态）：只读其后新增行，单请求
+  扫描上限 2 MiB、单行上限 256 KiB；`has_more` 表示本次文件快照内还有
+  未处理数据，`next_cursor` 在 EOF 仍返回（前端据此显示"检查更新"）；
+- 超长行/坏 JSON/非对象 JSON 跳过并记录可控日志；超长整行不进内存；
+- 文件截断（offset 越界）→ 400 `invalid_cursor`，前端清空旧游标刷新
+  第一页；旧 v1 monitor cursor 兼容解码为普通行边界起点；
+- EOF 无换行的未完成尾行视为未完成：保留其起点，追加日志后再解析。
 
 ## SSE 事件与断连语义 [已实测]
 
 `POST /chat` 返回 `text/event-stream`，帧类型：`thread` / `tool` / `text` /
-`limit` / `error` / `done`。`error` 帧形状：
+`limit` / `error` / `done`。`error` 帧形状（前端把错误说明保存为消息
+`note`，重绘/切换会话后仍可见）：
 `{"type":"error","code":"internal_error","message":"<稳定文案>","request_id":"..."}`
 ——不含 provider/路径等内部细节，完整 traceback 只留服务端日志。
 

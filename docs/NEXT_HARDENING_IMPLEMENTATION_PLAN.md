@@ -227,6 +227,12 @@ SSE 已开始后不能改变 HTTP 状态，因此保留顶层 `message`：
 | history | 100 | 500 | 最新消息，响应仍按旧到新 |
 | monitor sessions | 50 | 200 | 最近修改 |
 | monitor events | 500 | 2000 | 最新事件，响应仍按旧到新 |
+
+> 状态更新（收尾修复 Phase 3，2026-09-05）：monitor events 已落地为
+> **tail-follow**（最新页 200 条 + “继续加载/检查更新”增量），向后翻历史
+> 不是本阶段交付项——请勿把“加载更早事件”的向后翻页与“读取新增”的
+> tail-follow 混进同一个 cursor。有界读取实现见 `docs/webui-api.md` 的
+> `/monitor/events` 一节与 `novamind/webui/event_reader.py`。
 | skills | 100 | 200 | 名称升序 |
 
 聊天建议限制 `message <= 64K` 字符、请求体 `<= 256 KiB`。如果后续产品数据证明不足，只调整配置和文档，不移除硬上限。
