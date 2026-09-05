@@ -550,5 +550,52 @@ class TestAtomicTurnCommit(unittest.TestCase):
         store.close()
 
 
+class TestDeleteOrdering(unittest.TestCase):
+    """收尾修复 Phase 2：先删数据库成功后才清内存，失败时内存保留。"""
+
+    def _mk_store(self, fail=False):
+        import os
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="novamind_delorder_")
+        store = ConversationStore(db_path=os.path.join(tmp, "s.sqlite3"))
+        store.save_message("t_del", HumanMessage(content="keep me"))
+        if fail:
+            store.clear_thread = lambda tid: (_ for _ in ()).throw(
+                RuntimeError("db locked"))
+        return store, tmp
+
+    def test_aclear_db_failure_keeps_memory_and_db(self):
+        store, _ = self._mk_store(fail=True)
+        agent = NovaMindAgent(conversation_store=store)
+        state = agent._get_or_create_state("t_del")
+        self.assertTrue(any(m.content == "keep me" for m in state.messages))
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(agent.aclear_conversation("t_del"))
+        # 数据库删除失败 → 内存与数据库都保留
+        self.assertIn("t_del", agent._states)
+        self.assertIn("t_del", agent._persisted_counts)
+        store.close()
+
+    def test_aclear_success_clears_memory_after_db(self):
+        store, _ = self._mk_store()
+        agent = NovaMindAgent(conversation_store=store)
+        agent._get_or_create_state("t_del")
+        asyncio.run(agent.aclear_conversation("t_del"))
+        self.assertNotIn("t_del", agent._states)
+        self.assertNotIn("t_del", agent._persisted_counts)
+        self.assertEqual(store.load_messages("t_del"), [])
+        store.close()
+
+    def test_sync_clear_db_failure_keeps_memory(self):
+        store, _ = self._mk_store(fail=True)
+        agent = NovaMindAgent(conversation_store=store)
+        agent._get_or_create_state("t_del")
+        with self.assertRaises(RuntimeError):
+            agent.clear_conversation("t_del")
+        self.assertIn("t_del", agent._states)
+        store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

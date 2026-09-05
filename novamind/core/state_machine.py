@@ -1012,27 +1012,30 @@ class NovaMindAgent:
     def clear_conversation(self, thread_id: str) -> None:
         """清除指定会话的所有数据（内存+数据库）。
 
-        仅允许 idle 场景：thread 正在运行时抛错，请改用 aclear_conversation()。"""
+        仅允许 idle 场景：thread 正在运行时抛错，请改用 aclear_conversation()。
+        先删数据库、成功后才清内存：失败时内存与数据库都保留旧会话。"""
         if self._run_coordinator.is_busy(thread_id):
             raise RuntimeError(
                 f"thread '{thread_id}' 正在运行中；请使用 aclear_conversation()"
             )
-        self._states.pop(thread_id, None)
-        self._persisted_counts.pop(thread_id, None)
         if self._store:
             self._store.clear_thread(thread_id)
+        self._states.pop(thread_id, None)
+        self._persisted_counts.pop(thread_id, None)
 
     async def aclear_conversation(self, thread_id: str) -> None:
         """异步清除指定会话：与 run/astream 按 thread 互斥。
 
-        同一 thread 的在飞轮次结束后才执行删除；不同 thread 不受影响。"""
+        同一 thread 的在飞轮次结束后才执行删除；不同 thread 不受影响。
+        先删数据库、成功后才清内存：数据库删除失败时抛错，
+        内存与数据库都保留旧会话（调用方据此返回结构化 500）。"""
         lock = self._run_coordinator.acquire_ref(thread_id)
         try:
             async with lock:
-                self._states.pop(thread_id, None)
-                self._persisted_counts.pop(thread_id, None)
                 if self._store:
                     await asyncio.to_thread(self._store.clear_thread, thread_id)
+                self._states.pop(thread_id, None)
+                self._persisted_counts.pop(thread_id, None)
         finally:
             self._run_coordinator.release_ref(thread_id)
 

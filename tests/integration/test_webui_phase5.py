@@ -404,9 +404,13 @@ class TestFrontendHardeningStatic(unittest.TestCase):
 
     def test_terminal_note_persists_in_state(self):
         page = open("novamind/webui/static/index.html", encoding="utf-8").read()
-        self.assertIn("note: errorText", page, "停止/错误提示必须写入消息状态")
+        logic = open("novamind/webui/static/chat_logic.js", encoding="utf-8").read()
+        # 终态经纯 helper 构建（note 字段），渲染回放
+        self.assertIn("NovaMindChatLogic.buildFinalMessage(turn)", page,
+                      "最终消息经 helper 构建")
         self.assertIn("if (m.note)", page, "渲染必须回放终态提示")
-        self.assertIn("id=\"stop\"", page, "STOP 按钮必须存在")
+        self.assertIn("errorText", logic, "helper 维护 errorText")
+        self.assertIn('id="stop"', page, "STOP 按钮必须存在")
 
 
 if __name__ == "__main__":

@@ -225,6 +225,54 @@ class TestRunGui(unittest.TestCase):
         self.assertTrue(server.should_exit)
 
 
+class TestDeleteFailureContract(unittest.TestCase):
+    """收尾修复 Phase 2：DELETE 失败返回结构化 500，列表与内存保留。"""
+
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def test_delete_failure_agent_path_returns_structured_500(self):
+        """Agent 已创建：aclear 抛错 → 500 session_delete_failed，不泄露异常。"""
+        class BrokenAgent:
+            def __init__(self):
+                self._states = {"t1": object()}
+
+            async def aclear_conversation(self, thread_id):
+                raise RuntimeError("secret db path /data/x.sqlite3")
+
+        fake_runtime = MagicMock()
+        fake_runtime.agent_if_ready.return_value = BrokenAgent()
+        with patch("novamind.webui.server.get_runtime", return_value=fake_runtime):
+            resp = self.client.delete("/sessions/t1")
+        self.assertEqual(resp.status_code, 500)
+        err = resp.json()["error"]
+        self.assertEqual(set(err.keys()), {"code", "message", "request_id"})
+        self.assertEqual(err["code"], "session_delete_failed")
+        self.assertNotIn("secret", err["message"])
+
+    def test_delete_failure_no_agent_path_returns_structured_500(self):
+        """Agent 未创建：走 history store 直删，数据库故障 → 500。"""
+        store = MagicMock()
+        store.clear_thread.side_effect = RuntimeError("disk locked")
+        fake_runtime = MagicMock()
+        fake_runtime.agent_if_ready.return_value = None
+        fake_runtime.get_history_store.return_value = store
+        with patch("novamind.webui.server.get_runtime", return_value=fake_runtime):
+            resp = self.client.delete("/sessions/none")
+        self.assertEqual(resp.status_code, 500)
+        self.assertEqual(resp.json()["error"]["code"], "session_delete_failed")
+
+    def test_delete_unknown_session_still_ok(self):
+        """删除不存在的会话幂等 200。"""
+        fake_runtime = MagicMock()
+        fake_runtime.agent_if_ready.return_value = None
+        fake_runtime.get_history_store.return_value = MagicMock()
+        with patch("novamind.webui.server.get_runtime", return_value=fake_runtime):
+            resp = self.client.delete("/sessions/does_not_exist")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"status": "ok"})
+
+
 if __name__ == "__main__":
     unittest.main()
 

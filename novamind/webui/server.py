@@ -302,11 +302,12 @@ def _error_responses(*codes: int) -> dict[int, dict]:
             for c in codes}
 
 
-def _error_response(status: int, code: str, message: str) -> JSONResponse:
+def _error_response(status: int, code: str, message: str,
+                    request_id: str | None = None) -> JSONResponse:
     return JSONResponse(
         status_code=status,
         content={"error": {"code": code, "message": message,
-                           "request_id": uuid.uuid4().hex}},
+                           "request_id": request_id or uuid.uuid4().hex}},
     )
 
 
@@ -713,12 +714,17 @@ async def get_history(thread_id: str, limit: int | None = None,
     return HistoryResponse(messages=items, pagination=pagination)
 
 
-@app.delete("/sessions/{thread_id}", response_model=DeleteResponse, response_model_exclude_none=True)
-async def delete_session(thread_id: str) -> DeleteResponse:
-    """删除指定会话（前端侧边栏删除按钮）。未知 thread 幂等返回 ok。"""
+@app.delete("/sessions/{thread_id}", response_model=DeleteResponse,
+            response_model_exclude_none=True, responses=_error_responses(500))
+async def delete_session(thread_id: str):
+    """删除指定会话（前端侧边栏删除按钮）。
+
+    成功与删除不存在的 thread 幂等返回 200 {"status":"ok"}；实际删除失败
+    返回结构化 500（code=session_delete_failed，同一 request_id 写日志并
+    返回），不转成通用 http_error。"""
     try:
-        # Phase 3：Agent 的按 thread 互斥删除（等待在飞轮次结束）。
-        # Phase 5：全局 chat 锁已移除，同 thread 互斥由协调器保证。
+        # Agent 的按 thread 互斥删除（等待在飞轮次结束）；aclear 先删数据库
+        # 成功后才清内存，失败时内存与数据库都保留旧会话。
         runtime = get_runtime()
         agent = runtime.agent_if_ready()
         if agent is not None:
@@ -727,8 +733,10 @@ async def delete_session(thread_id: str) -> DeleteResponse:
             await asyncio.to_thread(runtime.get_history_store().clear_thread, thread_id)
         return DeleteResponse(status="ok")
     except Exception:
-        logger.exception("delete session failed")
-        return DeleteResponse(status="error", message="删除会话失败，请稍后重试")
+        request_id = uuid.uuid4().hex
+        logger.exception("delete session failed (request_id=%s)", request_id)
+        return _error_response(500, "session_delete_failed",
+                               "删除会话失败，请稍后重试", request_id)
 
 
 # 静态文件（前端 index.html）最后挂载，避免拦截 /chat /health

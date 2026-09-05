@@ -494,6 +494,7 @@
     <button id="send">SEND</button>
   </footer>
 
+<script src="chat_logic.js"></script>
 <script>
 (function () {
   const messagesEl = document.getElementById('messages');
@@ -739,10 +740,11 @@
       // 删除运行中的会话：先 abort 本轮（服务端取消并回滚），再调 DELETE
       if (st && st.running && st.abortController) st.abortController.abort();
       try {
-        await fetchJson('/sessions/' + encodeURIComponent(s.threadId), { method: 'DELETE' });
+        const data = await fetchJson('/sessions/' + encodeURIComponent(s.threadId), { method: 'DELETE' });
+        if (!data || data.status !== 'ok') throw new Error('服务端未确认删除');
       } catch (err) {
         flashStatus('删除失败：' + err.message);
-        return;  // 删除失败不做乐观移除，会话保留
+        return;  // 删除失败（含遗留 200 error）不做乐观移除，会话保留
       }
     }
     sessionStates.delete(id);
@@ -940,10 +942,8 @@
     };
     ensureAttached();
 
-    const tools = [];
-    const chunks = [];
+    const turn = NovaMindChatLogic.createTurnState();
     let aborted = false;
-    let errorText = null;
 
     try {
       const resp = await fetch('/chat', {
@@ -989,52 +989,54 @@
               sessionId = data.thread_id;
               localStorage.setItem('novamind_last_thread', data.thread_id);
             }
-          } else if (data.type === 'tool') {
-            tools.push(data.name);
-            if (ensureAttached()) {
-              const tag = document.createElement('span');
-              tag.className = 'tool-tag';
-              tag.textContent = '⚙ ' + data.name;
-              aiEl.insertBefore(tag, aiBody);
-              messagesEl.scrollTop = messagesEl.scrollHeight;
-            }
-          } else if (data.type === 'text') {
-            chunks.push(data.content);
-            if (ensureAttached()) {
-              aiBody.innerHTML = renderMarkdown(chunks.join(''));
-              messagesEl.scrollTop = messagesEl.scrollHeight;
-            }
-          } else if (data.type === 'limit') {
-            if (ensureAttached()) {
-              const seg = document.createElement('span');
-              seg.innerHTML = '<b>⚠ 达到最大循环次数</b>';
-              aiEl.insertBefore(seg, aiBody);
-            }
-          } else if (data.type === 'error') {
-            if (ensureAttached()) {
-              const seg = document.createElement('span');
-              seg.textContent = '错误: ' + (data.message || '未知错误');
-              aiEl.insertBefore(seg, aiBody);
+          } else {
+            // 状态统一走纯 helper（含 errorText 稳定文案），DOM 按类型更新
+            const changed = NovaMindChatLogic.applyFrame(turn, data);
+            if (!changed) continue;
+            if (data.type === 'tool') {
+              if (ensureAttached()) {
+                const tag = document.createElement('span');
+                tag.className = 'tool-tag';
+                tag.textContent = '⚙ ' + data.name;
+                aiEl.insertBefore(tag, aiBody);
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+              }
+            } else if (data.type === 'text') {
+              if (ensureAttached()) {
+                aiBody.innerHTML = renderMarkdown(turn.chunks.join(''));
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+              }
+            } else if (data.type === 'limit') {
+              if (ensureAttached()) {
+                const seg = document.createElement('span');
+                seg.innerHTML = '<b>⚠ 达到最大循环次数</b>';
+                aiEl.insertBefore(seg, aiBody);
+              }
+            } else if (data.type === 'error') {
+              if (ensureAttached()) {
+                const seg = document.createElement('span');
+                seg.textContent = turn.errorText;
+                aiEl.insertBefore(seg, aiBody);
+              }
             }
           }
         }
       }
     } catch (err) {
       aborted = err.name === 'AbortError';
-      errorText = aborted
-        ? '⏹ 已停止（本轮已取消并回滚）'
-        : '连接失败: ' + err.message;
+      NovaMindChatLogic.setTerminalError(turn, aborted, err.message);
       const seg = document.createElement('span');
-      seg.textContent = errorText;
+      seg.textContent = turn.errorText;
       if (ensureAttached()) aiEl.insertBefore(seg, aiBody);
     } finally {
       cursorEl.remove();
-      if (chunks.length) addCopyBtn(aiEl, () => chunks.join(''));
+      if (turn.chunks.length) addCopyBtn(aiEl, () => turn.chunks.join(''));
       st.running = false;
       st.abortController = null;
-      if (chunks.length || tools.length || errorText) {
+      const finalMsg = NovaMindChatLogic.buildFinalMessage(turn);
+      if (finalMsg) {
         // 终态（含停止/错误提示）写入会话状态：切换/重绘后仍然可见
-        st.messages.push({ role: 'ai', content: chunks.join(''), tools, note: errorText });
+        st.messages.push(finalMsg);
       }
       if (sessionId === currentId) { renderMessages(); refreshRunUI(); }
       renderSessions();
