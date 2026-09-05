@@ -1104,16 +1104,36 @@
     }
   }
   let monitorEventsCache = [];
+  let monitorEventsFetching = false;
+  let monitorEventsToken = 0;
+  const MONITOR_CACHE_LIMIT = 2000;
+
   async function fetchEvents(threadId, cursor) {
-    // Phase 6：默认有界读取（尾页 200 条），游标 tail-follow 增量拉取
+    // 收尾修复 Phase 3：有界尾页（limit=200）+ tail-follow 增量拉取。
+    // 捕获请求 token：切换会话后旧响应直接丢弃，不追加进新会话缓存。
+    const token = ++monitorEventsToken;
     try {
       let url = '/monitor/events/' + encodeURIComponent(threadId) + '?limit=200';
       if (cursor) url += '&cursor=' + encodeURIComponent(cursor);
       const data = await fetchJson(url);
-      pageState.monitorEvents.cursor = (data.pagination && data.pagination.next_cursor) || null;
-      pageState.monitorEvents.hasMore = !!(data.pagination && data.pagination.has_more);
-      return data.events || [];
-    } catch (e) { return []; }
+      if (token !== monitorEventsToken || threadId !== monitorActiveId) {
+        return null;  // 已切换会话：丢弃旧响应
+      }
+      const pag = data.pagination || {};
+      return {
+        events: data.events || [],
+        nextCursor: pag.next_cursor || null,
+        hasMore: !!pag.has_more,
+      };
+    } catch (e) {
+      if (e.status === 400) {
+        // 文件截断/轮转：清空旧游标，下一次请求刷新第一页
+        pageState.monitorEvents.cursor = null;
+        pageState.monitorEvents.hasMore = false;
+        monitorEventsCache = [];
+      }
+      return null;
+    }
   }
   function eventLabel(ev) {
     const map = {
@@ -1156,10 +1176,34 @@
     }
 
     if (resetEvents) {
-      monitorEventsCache = await fetchEvents(monitorActiveId);
-    } else {
-      const newer = await fetchEvents(monitorActiveId, pageState.monitorEvents.cursor);
-      monitorEventsCache = monitorEventsCache.concat(newer);
+      // 切换会话：重置缓存与游标，请求最新尾页
+      monitorEventsCache = [];
+      pageState.monitorEvents.cursor = null;
+      pageState.monitorEvents.hasMore = false;
+      const page = await fetchEvents(monitorActiveId, null);
+      if (page) {
+        monitorEventsCache = page.events;
+        pageState.monitorEvents.cursor = page.nextCursor;
+        pageState.monitorEvents.hasMore = page.hasMore;
+      }
+    } else if (!monitorEventsFetching) {
+      // 增量：防重入（同一监控页同时只允许一次增量请求）
+      monitorEventsFetching = true;
+      try {
+        const page = await fetchEvents(monitorActiveId, pageState.monitorEvents.cursor);
+        if (page) {
+          // 空增量页只更新 cursor，不清空已有事件
+          monitorEventsCache = monitorEventsCache.concat(page.events);
+          pageState.monitorEvents.cursor = page.nextCursor;
+          pageState.monitorEvents.hasMore = page.hasMore;
+          if (monitorEventsCache.length > MONITOR_CACHE_LIMIT) {
+            // 长时间查看：浏览器缓存保留最新 2000 条
+            monitorEventsCache = monitorEventsCache.slice(-MONITOR_CACHE_LIMIT);
+          }
+        }
+      } finally {
+        monitorEventsFetching = false;
+      }
     }
     const events = monitorEventsCache;
     let evHtml = '';
@@ -1172,11 +1216,10 @@
           '<span class="event-type">' + eventLabel(e.event) + '</span>' +
           '<span class="event-detail">' + escapeHtml(eventDetail(e)) + '</span></div>';
       });
-      if (pageState.monitorEvents.cursor) {
-        // tail-follow：服务端还有此前未读进来的增量
-        evHtml += '<div class="load-more" id="events-load-more">加载更新…</div>';
-      }
     }
+    // EOF 也保留更新入口（has_more=false 显示"检查更新"，可继续 tail-follow）
+    evHtml += '<div class="load-more" id="events-load-more">' +
+      (pageState.monitorEvents.hasMore ? '继续加载…' : '检查更新') + '</div>';
 
     panelEl.innerHTML = '<div class="panel-header"><span class="bar">❯</span> 监控面板 <span class="count">' + monitorSessions.length + ' LOGS</span></div>' +
       '<div class="panel-sub">AUDIT EVENT STREAM · LIVE</div>' +

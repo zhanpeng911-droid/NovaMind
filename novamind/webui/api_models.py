@@ -165,3 +165,26 @@ def decode_cursor(raw: str, kind: str, fields: dict[str, type]) -> dict[str, Any
         if expected is str and not isinstance(value, str):
             raise InvalidCursorError(f"cursor field '{name}' must be str")
     return data
+
+
+def encode_monitor_events_cursor(offset: int, discarding: bool = False) -> str:
+    """monitor events 专用 v2 cursor：offset + 超长行丢弃状态。
+
+    discarding 用整数 0/1 编码，通过全局严格类型校验（不放宽）。"""
+    return encode_cursor("monitor_events_v2",
+                         {"offset": int(offset),
+                          "discarding": 1 if discarding else 0})
+
+
+def decode_monitor_events_cursor(raw: str) -> tuple[int, bool]:
+    """monitor events 游标解码：优先 v2（offset + discarding），
+    回退 v1（仅 offset，discarding=False 的普通行边界起点）。
+
+    两种 kind 都失败才抛 InvalidCursorError。"""
+    try:
+        data = decode_cursor(raw, "monitor_events_v2",
+                             {"offset": int, "discarding": int})
+        return data["offset"], bool(data["discarding"])
+    except InvalidCursorError:
+        data = decode_cursor(raw, "monitor_events", {"offset": int})
+        return data["offset"], False

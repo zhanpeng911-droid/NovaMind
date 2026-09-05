@@ -400,7 +400,11 @@ class TestFrontendHardeningStatic(unittest.TestCase):
         page = open("novamind/webui/static/index.html", encoding="utf-8").read()
         self.assertIn("'?limit=200'", page, "monitor events 默认请求必须有界")
         self.assertIn("pageState.monitorEvents.cursor", page, "必须使用分页游标")
-        self.assertIn("加载更新", page, "必须有 tail-follow 增量按钮")
+        # EOF 也保留更新入口：has_more 显示"继续加载"，否则"检查更新"
+        self.assertIn("继续加载", page, "has_more=true 时显示继续加载")
+        self.assertIn("检查更新", page, "EOF 仍可检查更新")
+        self.assertIn("monitorEventsFetching", page, "增量请求必须防重入")
+        self.assertIn("monitorEventsToken", page, "必须用请求 token 丢弃旧响应")
 
     def test_terminal_note_persists_in_state(self):
         page = open("novamind/webui/static/index.html", encoding="utf-8").read()
@@ -411,6 +415,61 @@ class TestFrontendHardeningStatic(unittest.TestCase):
         self.assertIn("if (m.note)", page, "渲染必须回放终态提示")
         self.assertIn("errorText", logic, "helper 维护 errorText")
         self.assertIn('id="stop"', page, "STOP 按钮必须存在")
+
+
+class TestMonitorEventsBoundSemantics(unittest.TestCase):
+    """收尾修复 Phase 3：默认 200、非法 limit 422、EOF 空页保留游标。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="novamind_p3_")
+        self.log_path = os.path.join(self.tmp, "s_bound.jsonl")
+        with open(self.log_path, "w", encoding="utf-8") as f:
+            for i in range(3):
+                f.write(json.dumps({"event": f"e{i}", "n": i}) + "\n")
+        self.client = TestClient(app)
+
+    def _get(self, **params):
+        with patch("novamind.webui.server.LOG_DIR", self.tmp):
+            return self.client.get("/monitor/events/s_bound", params=params)
+
+    def test_default_limit_200_bounded(self):
+        body = self._get().json()
+        self.assertEqual(body["pagination"]["limit"], 200)
+        self.assertEqual([e["event"] for e in body["events"]], ["e0", "e1", "e2"])
+        # 无 limit 不再全量语义：默认页即尾页 200（本文件不足 200 → 全部）
+        self.assertEqual(len(body["events"]), 3)
+
+    def test_invalid_limit_422(self):
+        for bad in ("0", "1001", "abc", "-5"):
+            resp = self._get(limit=bad)
+            self.assertEqual(resp.status_code, 422, f"limit={bad}")
+            self.assertEqual(resp.json()["error"]["code"], "validation_error")
+
+    def test_eof_empty_page_keeps_cursor(self):
+        """读到 EOF 后空增量页：has_more=false 但 next_cursor 非空，
+        追加后同一游标能读到新事件（前端据此显示"检查更新"）。"""
+        page1 = self._get(limit=1).json()
+        cursor = page1["pagination"]["next_cursor"]
+        self.assertIsNotNone(cursor, "EOF 页也必须返回游标")
+        # 无新增 → 空页 + 同游标
+        empty = self._get(limit=10, cursor=cursor).json()
+        self.assertEqual(empty["events"], [])
+        self.assertFalse(empty["pagination"]["has_more"])
+        self.assertIsNotNone(empty["pagination"]["next_cursor"])
+        # 追加后同游标读到新事件
+        with open(self.log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"event": "e3", "n": 3}) + "\n")
+        after = self._get(limit=10, cursor=cursor).json()
+        self.assertEqual([e["event"] for e in after["events"]], ["e3"])
+
+    def test_truncation_invalid_cursor_400(self):
+        page1 = self._get(limit=1).json()
+        cursor = page1["pagination"]["next_cursor"]
+        with open(self.log_path, "w", encoding="utf-8") as f:
+            f.write("")
+        resp = self._get(limit=1, cursor=cursor)
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["error"]["code"], "invalid_cursor")
 
 
 if __name__ == "__main__":

@@ -46,7 +46,9 @@ from novamind.webui.api_models import (
     SessionsResponse,
     SkillsResponse,
     decode_cursor,
+    decode_monitor_events_cursor,
     encode_cursor,
+    encode_monitor_events_cursor,
 )
 from novamind.webui.runtime import WebRuntime
 
@@ -263,6 +265,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     codes = {
         400: "bad_request", 404: "not_found", 405: "method_not_allowed",
         413: "body_too_large", 415: "unsupported_media_type",
+        422: "validation_error",
     }
     return _error_response(exc.status_code,
                            codes.get(exc.status_code, "http_error"),
@@ -479,98 +482,66 @@ async def monitor_sessions(limit: int | None = None, cursor: str | None = None):
 
 
 @app.get("/monitor/events/{thread_id}", response_model=MonitorEventsResponse,
-         response_model_exclude_none=True, responses=_error_responses(400, 500))
+         response_model_exclude_none=True, responses=_error_responses(400, 422, 500))
 async def monitor_events(thread_id: str, limit: int | None = None,
                          cursor: str | None = None):
-    limit = max(1, min(int(limit), 1000)) if limit is not None else None
     """返回指定会话的审计事件流（解析后的 JSON 列表）。
 
-    分页语义（tail-follow）：无 cursor 时从文件尾读最近 limit 条，返回的
-    next_cursor 是读到的文件尾偏移，之后每次调用只读其后新增行（翻到文
-    件尾为止）。文件被截断（大小小于游标）→ 400 invalid_cursor，前端应
-    刷新第一页。单行超过大小上限的坏行跳过。"""
+    收尾修复 Phase 3 语义（tail-follow，有界读取）：
+    - 默认 limit=200，上限 1000；非法 limit → 422；省略 limit 不再返回全量；
+    - 无 cursor：从文件尾读最近 limit 条完整行；next_cursor 指向尾行起点
+      （EOF 也返回，空页也返回），供后续增量读取；
+    - 有 cursor：只读其后新增行（有界扫描 ≤2 MiB），EOF 时 has_more=false
+      但 next_cursor 仍保留当前位置，追加日志后可继续查更新；
+    - 文件截断导致 offset 越界 → 400 invalid_cursor，前端应清空旧游标
+      刷新第一页；
+    - 单行超过 256 KiB / 坏 JSON / 非对象 JSON 跳过并记录可控日志。"""
+    if limit is None:
+        limit = 200
+    else:
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422,
+                                detail="limit 必须是整数") from None
+        if limit < 1 or limit > 1000:
+            raise HTTPException(status_code=422,
+                                detail="limit 必须在 1~1000 之间") from None
+
     path = os.path.join(LOG_DIR, f"{_safe_id(thread_id)}.jsonl")
     if not os.path.isfile(path):
         return MonitorEventsResponse(events=[])
 
     offset: int | None = None
+    discarding = False
     if cursor:
-        data = decode_cursor(cursor, "monitor_events", {"offset": int})
-        offset = data["offset"]
+        try:
+            offset, discarding = decode_monitor_events_cursor(cursor)
+        except InvalidCursorError:
+            raise
+
+    from novamind.webui.event_reader import (
+        OffsetBeyondEOFError,
+        read_events,
+    )
 
     try:
-        file_size = os.path.getsize(path)
-    except OSError:
-        return MonitorEventsResponse(events=[])
-
-    if offset is not None and offset > file_size:
+        result = await asyncio.to_thread(
+            read_events, path, limit=limit,
+            offset=offset, discarding=discarding,
+        )
+    except OffsetBeyondEOFError:
         # 文件截断/轮转：游标越界
-        raise InvalidCursorError("monitor file truncated below cursor offset")
+        raise InvalidCursorError("monitor file truncated below cursor offset") from None
 
-    max_line = 256 * 1024  # 单行大小上限：超长的坏行跳过
-
-    def _parse(raw_lines) -> tuple[list[dict], int]:
-        """解析行（跳过坏行/超长行），返回 (events, 消费字节数)。"""
-        parsed: list[dict] = []
-        consumed = 0
-        for raw in raw_lines:
-            consumed += len(raw) + 1  # +1 换行
-            line = raw.strip()
-            if not line or len(line) > max_line:
-                continue
-            with contextlib.suppress(json.JSONDecodeError):
-                parsed.append(json.loads(line))
-        return parsed, consumed
-
-    if offset is not None:
-        # 只读 offset 之后的新增行（最多 limit 条）
-        with open(path, "rb") as f:
-            f.seek(offset)
-            raw = f.read()
-        lines = raw.splitlines()
-        take = lines[:limit] if limit is not None else lines
-        events, consumed = _parse(take)
-        new_offset = offset + consumed
-        has_more = new_offset < file_size
-        next_raw = (
-            encode_cursor("monitor_events", {"offset": new_offset})
-            if has_more else None
-        )
-        return MonitorEventsResponse(
-            events=events, pagination=_pagination(limit or 0, events, next_raw)
-        )
-
-    if limit is None:
-        # 全量（兼容旧行为）
-        with open(path, "rb") as f:
-            raw = f.read()
-        events, _ = _parse(raw.splitlines())
-        return MonitorEventsResponse(events=events)
-
-    # 无 cursor：从文件尾读最近 limit 条；next_cursor 指向本次文件尾，
-    # 供后续调用 tail-follow 新增事件
-    with open(path, "rb") as f:
-        chunks: list[bytes] = []
-        pos = file_size
-        scanned = 0
-        while pos > 0 and scanned < limit * max_line:
-            step = min(8192, pos)
-            pos -= step
-            f.seek(pos)
-            chunk = f.read(step)
-            chunks.insert(0, chunk)
-            scanned += step
-            if chunk.count(b"\n") >= limit:
-                break
-        tail = b"".join(chunks)
-    lines = tail.splitlines()
-    if tail and not tail.endswith(b"\n"):
-        lines = lines[1:]  # 丢弃可能被截断的首行
-    events, _ = _parse(lines[-limit:])
-    next_raw = encode_cursor("monitor_events", {"offset": file_size})
-    pagination = PaginationMeta(limit=limit, count=len(events),
-                                has_more=False, next_cursor=next_raw)
-    return MonitorEventsResponse(events=events, pagination=pagination)
+    next_raw = encode_monitor_events_cursor(result.next_offset, result.discarding)
+    return MonitorEventsResponse(
+        events=result.events,
+        pagination=PaginationMeta(
+            limit=limit, count=len(result.events),
+            has_more=result.has_more, next_cursor=next_raw,
+        ),
+    )
 
 
 @app.get("/skills", response_model=SkillsResponse,
