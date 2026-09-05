@@ -124,7 +124,11 @@ def _incremental_read(
 
             if b"\n" not in buf:
                 if len(buf) > MAX_LINE:
-                    # 当前行已超长：进入丢弃模式，清空缓冲（不保留超长内容）
+                    # 当前行已超长：丢弃已缓冲部分（不保留超长内容），
+                    # 并推进实际消费位置——否则 next_offset 停在旧处，
+                    # 再次读取会重复已解析的事件。
+                    pos += len(buf)
+                    line_start = pos
                     discarding = True
                     buf = b""
                     continue
@@ -170,20 +174,24 @@ def _incremental_read(
 def _tail_read(path: str, file_size: int, limit: int) -> ReadResult:
     """首次最新页：从文件尾分块向前扫描，取最近 limit 条完整行。
 
-    尾部无换行的未完成行保留其起点作为下一次增量 cursor；只有从文件
-    中间起读时才丢弃头部不完整行（预算内少于 limit 也可返回）。"""
+    同时受换行数与扫描字节预算约束：长文件缺少换行时不会持续向前读满
+    整个文件（累计读入 ≤ SCAN_BUDGET）。尾部无换行的未完成行保留其起点
+    作为下一次增量 cursor；只有从文件中间起读时才丢弃头部不完整行
+    （预算内少于 limit 也可返回）。超长行（> MAX_LINE）跳过。"""
     events: list[dict] = []
     with open(path, "rb") as f:
         data = b""
         pos = file_size
         newlines = 0
-        while pos > 0 and newlines <= limit:
-            step = min(CHUNK_SIZE, pos)
+        scanned = 0
+        while pos > 0 and newlines <= limit and scanned < SCAN_BUDGET:
+            step = min(CHUNK_SIZE, pos, SCAN_BUDGET - scanned)
             pos -= step
             f.seek(pos)
             chunk = f.read(step)
             data = chunk + data
             newlines += chunk.count(b"\n")
+            scanned += len(chunk)
 
         # 尾部无换行 → 最后一段是未完成尾行（保留起点）
         tail_incomplete = b""
@@ -192,9 +200,13 @@ def _tail_read(path: str, file_size: int, limit: int) -> ReadResult:
             tail_incomplete = parts[-1]
             data = data[: len(data) - len(tail_incomplete)]
 
+        # 未完成尾行超长：返回 discard 状态，下次增量从该起点跳过换行
+        tail_discarding = len(tail_incomplete) > MAX_LINE
+
         if not data:
             next_offset = file_size - len(tail_incomplete)
-            return ReadResult([], next_offset, has_more=False, discarding=False)
+            return ReadResult([], next_offset, has_more=False,
+                              discarding=tail_discarding)
 
         lines = data.split(b"\n")
         if data.endswith(b"\n"):
@@ -202,9 +214,12 @@ def _tail_read(path: str, file_size: int, limit: int) -> ReadResult:
         if pos > 0:
             lines = lines[1:]   # 从文件中间起读：丢弃头部不完整行
         for raw in lines[-limit:]:
+            if len(raw) > MAX_LINE:
+                continue  # 超长完整行：跳过（不整行读进内存）
             obj = _parse_line(raw)
             if obj is not None:
                 events.append(obj)
 
         next_offset = file_size - len(tail_incomplete)
-        return ReadResult(events, next_offset, has_more=False, discarding=False)
+        return ReadResult(events, next_offset, has_more=False,
+                          discarding=tail_discarding)

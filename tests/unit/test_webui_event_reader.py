@@ -201,5 +201,95 @@ class TestIncrementalRead(unittest.TestCase):
         os.unlink(path)
 
 
+class TestReaderReviewFixes(unittest.TestCase):
+    """复核缺陷回归（2026-09-05）：tail 扫描预算 + 超长行丢弃不重复。"""
+
+    def test_tail_read_respects_scan_budget(self):
+        """首次尾页读取必须受扫描预算约束：长文件缺少换行不会读满全文件。"""
+        from unittest import mock
+
+        fd, path = tempfile.mkstemp(prefix="novamind_tailbudget_", suffix=".jsonl")
+        os.close(fd)
+        with open(path, "wb") as f:
+            f.write(b"z" * (SCAN_BUDGET * 3 // 2))  # 3 MiB 无换行
+        sizes = []
+        real_open = open
+
+        def spy_open(file, *a, **kw):
+            fobj = real_open(file, *a, **kw)
+            orig = fobj.read
+
+            def read(size=-1):
+                if size is None or size < 0:
+                    raise AssertionError("禁止 read(-1)")
+                sizes.append(size)
+                return orig(size)
+
+            fobj.read = read
+            return fobj
+
+        with mock.patch("novamind.webui.event_reader.open", spy_open):
+            r = read_events(path, limit=200)
+        self.assertEqual(r.events, [])
+        self.assertLessEqual(sum(sizes), SCAN_BUDGET,
+                             "tail 扫描累计读入不得超预算")
+        self.assertLess(r.next_offset, os.path.getsize(path),
+                        "预算耗尽：未读完文件，游标应停在预算处")
+        os.unlink(path)
+
+    def test_long_line_discard_advances_cursor_no_duplicate(self):
+        """超长行 + 正常事件：丢弃超长行必须推进实际消费位置，
+        否则再次读取会重复返回同一事件。"""
+        path = _mk_file()
+        ev2 = json.dumps({"event": "e2", "n": 2}).encode()
+        with open(path, "wb") as f:
+            f.write(b"x" * (MAX_LINE + 10) + b"\n")
+            f.write(ev2 + b"\n")
+
+        r1 = read_events(path, limit=10, offset=0)
+        self.assertEqual([e["event"] for e in r1.events], ["e2"],
+                         "超长行被丢弃，正常事件被解析")
+        self.assertGreater(r1.next_offset, MAX_LINE,
+                           "游标必须越过超长行")
+        # 连续分页无重复
+        r2 = read_events(path, limit=10, offset=r1.next_offset,
+                         discarding=r1.discarding)
+        self.assertEqual(r2.events, [])
+        self.assertEqual(r2.next_offset, r1.next_offset)
+        # 追加后仍正常 tail-follow（不重复已返回事件）
+        with open(path, "ab") as f:
+            f.write(json.dumps({"event": "e3", "n": 3}).encode() + b"\n")
+        r3 = read_events(path, limit=10, offset=r1.next_offset,
+                         discarding=r1.discarding)
+        self.assertEqual([e["event"] for e in r3.events], ["e3"])
+        os.unlink(path)
+
+    def test_consecutive_pages_no_duplicates_mixed(self):
+        """混合场景：正常行 + 超长行交错，连续增量分页无重复无遗漏。"""
+        path = _mk_file()
+        with open(path, "wb") as f:
+            f.write(_ev(1) + b"\n")
+            f.write(b"x" * (MAX_LINE + 5) + b"\n")   # 超长
+            f.write(_ev(2) + b"\n")
+            f.write(_ev(3) + b"\n")
+        r = read_events(path, limit=10)
+        self.assertEqual([e["event"] for e in r.events], ["e1", "e2", "e3"],
+                         "limit 足够时尾页返回全部完整行，超长行被跳过")
+        collected = [e["event"] for e in r.events]
+        # 增量向后：收集全部，验证无重复
+        cursor, disc = r.next_offset, r.discarding
+        seen = set(collected)
+        for _ in range(5):
+            if cursor is None:
+                break
+            page = read_events(path, limit=10, offset=cursor, discarding=disc)
+            cursor, disc = page.next_offset, page.discarding
+            for e in page.events:
+                self.assertNotIn(e["event"], seen, "分页不得重复事件")
+                seen.add(e["event"])
+        self.assertEqual(seen, {"e1", "e2", "e3"}, "全部事件无遗漏")
+        os.unlink(path)
+
+
 if __name__ == "__main__":
     unittest.main()
