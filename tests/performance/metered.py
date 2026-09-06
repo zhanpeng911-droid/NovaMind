@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 import time
 from typing import Any, override
 
@@ -54,6 +56,10 @@ class MeteredChatModel(BaseChatModel):
         try:
             ai: AIMessage = target.invoke(messages, stop=stop, **kwargs)
         except Exception as exc:
+            if os.environ.get("NOVAMIND_DEBUG_MSGS"):
+                for i, m in enumerate(messages):
+                    print(f"DBGMSG[{i}]", type(m).__module__, type(m).__name__,
+                          repr(m)[:100], flush=True)
             self._finish(call_id, started, None, None, "error",
                          reserve, error=str(exc)[:200])
             raise
@@ -71,6 +77,11 @@ class MeteredChatModel(BaseChatModel):
             raise RuntimeError("budget_exceeded: 预算不足或达到熔断比例")
         try:
             ai: AIMessage = await target.ainvoke(messages, stop=stop, **kwargs)
+        except asyncio.CancelledError:
+            # 异步取消：留下 cancelled 记录（unknown usage，保留预留），
+            # 收尾后仍重新抛出；供应商请求是否已提交无法由本地确认。
+            self._finish(call_id, started, None, None, "cancelled", reserve)
+            raise
         except Exception as exc:
             self._finish(call_id, started, None, None, "error",
                          reserve, error=str(exc)[:200])
@@ -91,6 +102,7 @@ class MeteredChatModel(BaseChatModel):
             duration_ms=duration,
             input_tokens=inp,
             output_tokens=out,
+            reserved_yuan=reserve,
             error=error,
         ), reserve=reserve)
 

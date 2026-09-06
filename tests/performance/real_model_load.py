@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import sys
 import time
 from dataclasses import dataclass, field
@@ -45,6 +46,7 @@ class TurnResult:
     text_len: int = 0
     tool_count: int = 0
     frame_types: list = field(default_factory=list)
+    bad_frames: int = 0
     cancelled: bool = False
 
 
@@ -85,6 +87,7 @@ async def chat_once(client: httpx.AsyncClient, base: str,
             r.connect_ms = (time.monotonic() - t0) * 1000
             first_text = None
             async for chunk in resp.aiter_text():
+                r.bad_frames += parser.bad_frames
                 for frame in parser.feed(chunk):
                     r.frame_types.append(frame.type)
                     if frame.type == "text" and frame.data.get("content"):
@@ -119,8 +122,13 @@ async def chat_once(client: httpx.AsyncClient, base: str,
     return r
 
 
-async def run_turns(client, base, samples, tag, out, *, budget_ok) -> list[TurnResult]:
-    """闭环并发跑一批轮次（并发=1 的预热/基线）。"""
+async def run_turns(client, base, samples, tag, out, *, budget_ok,
+                   limit: int | None = None) -> list[TurnResult]:
+    """闭环并发跑一批轮次（并发=1 的预热/基线）。
+
+    limit 实际控制轮次数：0 → 直接跳过（返回空），None → 全部样本。"""
+    if limit is not None:
+        samples = samples[:limit]
     results: list[TurnResult] = []
     for i, msg in enumerate(samples):
         if not budget_ok():
@@ -147,18 +155,22 @@ async def run_ladder(client, base, concurrency_list, per_tier, budget_ok,
     shared = {"done": 0}
 
     async def worker(wid: int):
-        i = 0
-        while shared["done"] < per_tier:
+        while True:
+            # 事件循环单线程：检查+领取在同一同步段完成（无 await 间隙），
+            # 多个 worker 不会同时通过检查 → 不会超发
+            if shared["done"] >= per_tier:
+                return
             if not budget_ok():
                 print(f"  [stop] 预算熔断，{tag} c={shared['concurrency']} 在 "
                       f"{shared['done']} 轮停止")
                 return
-            msg = samples[i % len(samples)]
-            tid = f"perf_{tag}_c{shared['concurrency']}_w{wid}_{i}_{int(time.time())}"
+            idx = shared["done"]
+            shared["done"] += 1
+            # 整档共享固定样本序列（不同并发档用同一份样本集合）
+            msg = samples[idx % len(samples)]
+            tid = f"perf_{tag}_c{shared['concurrency']}_w{wid}_{idx}_{int(time.time())}"
             r = await chat_once(client, base, msg, tid)
             results.append(r)
-            shared["done"] += 1
-            i += 1
             status = "ok" if r.ok else f"FAIL({r.end_reason})"
             print(f"  [{tag} c={shared['concurrency']} w{wid} "
                   f"{shared['done']}/{per_tier}] {status} "
@@ -178,9 +190,11 @@ def summarize(results: list[TurnResult]) -> dict:
     ok_times = [r.total_ms for r in results if r.ok]
     ft_times = [r.first_text_ms for r in results if r.ok and r.first_text_ms]
     def pct(vals, p):
+        # nearest-rank 百分位：ceil(n*p)-1（小样本边界可见，不作可靠 p99 承诺）
         if not vals:
             return None
-        return round(sorted(vals)[int(len(vals) * p) - 1], 1) if len(vals) else None
+        idx = max(0, math.ceil(len(vals) * p) - 1)
+        return round(sorted(vals)[idx], 1)
     return {
         "n": len(results),
         "ok": sum(1 for r in results if r.ok),
@@ -197,12 +211,14 @@ def summarize(results: list[TurnResult]) -> dict:
 
 
 async def main_async(args) -> int:
-    out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # 唯一结果子目录：避免后续运行覆盖前一档
+    from datetime import datetime
+    run_dir = Path(args.out) / datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir.mkdir(parents=True, exist_ok=True)
 
-    # 预算停止条件由客户端维护（读取 calls.jsonl 累计花费）
+    # 预算停止条件由客户端维护（读取服务端 calls.jsonl 累计花费）
     budget_cap = args.budget
-    calls_log = out_dir / "calls.jsonl"
+    calls_log = Path(args.calls_log)
 
     def budget_ok() -> bool:
         if budget_cap is None:
@@ -226,22 +242,43 @@ async def main_async(args) -> int:
                     client, args.base, [c], args.per_tier, budget_ok,
                     tag=f"ladder_c{c}")
         elif args.scenario == "warmup":
-            print("== 预热 (3) ==")
+            print(f"== 预热 ({args.warmup}) ==")
             results["warmup"] = await run_turns(
-                client, args.base, WARMUP_SAMPLES, "warmup", out_dir,
-                budget_ok=budget_ok)
-            print("== 基线 (10) ==")
+                client, args.base, WARMUP_SAMPLES, "warmup", run_dir,
+                budget_ok=budget_ok, limit=args.warmup)
+            print(f"== 基线 ({args.baseline}) ==")
             results["baseline"] = await run_turns(
-                client, args.base, BASELINE_SAMPLES, "baseline", out_dir,
-                budget_ok=budget_ok)
+                client, args.base, BASELINE_SAMPLES, "baseline", run_dir,
+                budget_ok=budget_ok, limit=args.baseline)
+
+    # 只保存必要证据：批次/场景/thread_id/状态/耗时/长度（不含提示词/回复）
+    turns_path = run_dir / "turns.jsonl"
+    with open(turns_path, "w", encoding="utf-8") as f:
+        for tag, turns in results.items():
+            for r in turns:
+                f.write(json.dumps({
+                    "batch": run_dir.name,
+                    "scenario": tag,
+                    "thread_id": r.thread_id,
+                    "ok": r.ok,
+                    "ended": r.ended,
+                    "end_reason": r.end_reason,
+                    "status_code": r.status_code,
+                    "total_ms": round(r.total_ms, 1),
+                    "first_text_ms": round(r.first_text_ms, 1),
+                    "text_len": r.text_len,
+                    "tool_count": r.tool_count,
+                    "bad_frames": r.bad_frames,
+                }, ensure_ascii=False) + "\n")
 
     summary = {k: summarize(v) for k, v in results.items()}
-    report = {"results": summary}
-    report_path = out_dir / "summary.json"
+    report = {"batch": run_dir.name, "results": summary}
+    report_path = run_dir / "summary.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2),
                            encoding="utf-8")
     print("\n== 摘要 ==")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    print(f"turns 写入 {turns_path}")
     print(f"报告写入 {report_path}")
     return 0
 
@@ -251,8 +288,10 @@ def main() -> int:
     ap.add_argument("--base", default="http://127.0.0.1:8976")
     ap.add_argument("--warmup", type=int, default=3)
     ap.add_argument("--baseline", type=int, default=10)
-    ap.add_argument("--budget", type=float, default=10.0,
-                    help="客户端侧预算熔断（元，可选）")
+    ap.add_argument("--budget", type=float, default=None,
+                    help="客户端侧预算熔断（元，读取服务端 calls.jsonl 累计）")
+    ap.add_argument("--calls-log", default=None,
+                    help="服务端 calls.jsonl 路径（预算熔断读取；默认取 --out/calls.jsonl）")
     ap.add_argument("--out", default="tests/performance/.run")
     ap.add_argument("--scenario", choices=["warmup", "ladder"], default="warmup")
     ap.add_argument("--concurrency", default="1,2,4",
@@ -260,6 +299,12 @@ def main() -> int:
     ap.add_argument("--per-tier", type=int, default=20,
                     help="ladder 每档轮次上限")
     args = ap.parse_args()
+    # 轮次校验：0 允许跳过，负值拒绝
+    if args.warmup < 0 or args.baseline < 0 or args.per_tier < 0:
+        print("FATAL --warmup/--baseline/--per-tier 不得为负", file=sys.stderr)
+        return 2
+    if args.calls_log is None:
+        args.calls_log = str(Path(args.out) / "calls.jsonl")
     return asyncio.run(main_async(args))
 
 

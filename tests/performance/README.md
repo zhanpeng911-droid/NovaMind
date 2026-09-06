@@ -20,7 +20,10 @@
 - 供应商/模型（固定单一，避免降级混入）与金额上限
 - 机器信息、Python/依赖版本、源码 commit
 - 模型设置（温度/输出上限/超时/重试）与运行配置绝对路径
-- 确认隔离 workspace 不触碰生产数据库/日志
+- 确认隔离 workspace 不触碰生产数据库/会话库
+- **隔离限制（如实披露）**：测试 workspace / SQLite / office 目录独立于生产，
+  但源码模式下 audit logs 仍写入项目 `logs/`；只允许使用无隐私测试材料。
+  不要写“日志完全隔离”。需要完全独立日志再做源码快照运行或增加日志路径配置。
 
 ## 常用命令
 
@@ -61,6 +64,19 @@ python -m pytest tests/unit/test_real_model_load_harness.py -q
 
 ## 结果解读
 
-`calls.jsonl`：调用级 model/usage/耗时/status（凭据）。`summary.json`：每档
-样本量/p50/p95/max/失败原因。`report.md`：验收判定（参考方案 §7 建议标准）。
-少样本不作可靠 p99 承诺；成功样本延迟与失败等待分表报告。
+`calls.jsonl`：调用级 model/usage/耗时/status/reserved（凭据）。`summary.json`：
+每档样本量/p50/p95/max/失败原因。`report.md`：验收判定。少样本不作可靠
+p99 承诺；成功样本延迟与失败等待分表报告。客户端每次运行写入唯一结果子目录
+（`<out>/<时间戳>/turns.jsonl + summary.json`），不覆盖前一档；逐轮只保存
+批次/场景/thread_id/状态/耗时/长度，不含提示词或回复。
+
+## 费用保护（个人收尾 Phase 1）
+
+- unknown usage（usage 缺失/部分缺失/无法确认）**不按免费处理**：预留保留为
+  风险金额（pending 不释放），`summary` 区分“仍在途”与“已结束但费用未知”
+  （`unknown_reserved_yuan`）；实际费用超预留时如实记账并停止准入。
+- 输出上限/超时/重试经 `build_metered_llm` 显式传给真实模型（预检验证送达，
+  模型不支持即预检失败）；预算与单价拒绝 NaN/inf/非正。
+- 重启保护：calls.jsonl 已非空或未显式填写 `--budget` 时拒绝启动，防止误
+  操作恢复成全额预算；续测需新批次目录 + 显式剩余额度。预检不写付费日志。
+- 本地保护不宣称能终止已提交到供应商的任务或消除延迟出账。

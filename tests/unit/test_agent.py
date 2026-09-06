@@ -466,5 +466,59 @@ class TestHarnessPolicy(unittest.TestCase):
         asyncio.run(_test())
 
 
+class TestBeforeModelRemoveMessageFilter(unittest.TestCase):
+    """Phase 3 发现的核心缺陷回归：治理中间件在 before_model 的
+    messages_patch 里放 RemoveMessage（移除过期历史），agent_node 必须
+    过滤——RemoveMessage 不能作为普通消息发给模型（langchain 转换崩溃）。"""
+
+    def _build_with_patch(self, patch_messages):
+        from langchain_core.messages import AIMessage
+        from novamind.core.middlewares import BaseAgentMiddleware, MiddlewareResult
+
+        class GovernanceLike(BaseAgentMiddleware):
+            async def abefore_model(self, ctx):
+                return MiddlewareResult(messages_patch=list(patch_messages))
+
+        fake_llm = FakeLLM(responses=[AIMessage(content="done")])
+        with patch("novamind.core.agent.get_provider", return_value=fake_llm),                 patch("novamind.core.agent.load_dynamic_skills", return_value=[]),                 patch("novamind.core.agent.load_mcp_tools", return_value=[]):
+            from novamind.core.agent import create_agent_app
+            agent = create_agent_app(
+                audit_logger=FakeAuditLogger(), tools=[],
+                middlewares=[GovernanceLike()],
+            )
+        return agent, fake_llm
+
+    def test_remove_message_not_sent_to_model_and_history_removed(self):
+        import asyncio as _aio
+        from langchain_core.messages import HumanMessage, RemoveMessage
+
+        victim_id = "msg_victim"
+        agent, fake_llm = self._build_with_patch(
+            [RemoveMessage(id=victim_id),
+             HumanMessage(content="[governance] 当前任务重述",
+                          name="governance")])
+
+        # 预置会被治理移除的历史消息
+        st0 = agent._get_or_create_state("t_rm")
+        st0.add_message(HumanMessage(content="旧消息", id=victim_id))
+
+        async def _run():
+            return await agent.run("hi", thread_id="t_rm")
+
+        state = _aio.run(_run())
+        # 发给模型的消息绝不含 RemoveMessage
+        for msgs in fake_llm.call_history:
+            for m in msgs:
+                self.assertFalse(isinstance(m, RemoveMessage),
+                                 "RemoveMessage 不得发给模型")
+        # 治理注入的真实消息出现在发给模型的消息里
+        sent_all = [m for msgs in fake_llm.call_history for m in msgs]
+        self.assertTrue(any(getattr(m, "name", "") == "governance"
+                            for m in sent_all))
+        # RemoveMessage 真正从历史移除
+        self.assertNotIn(victim_id, [getattr(m, "id", None)
+                                     for m in state.messages])
+
+
 if __name__ == "__main__":
     unittest.main()

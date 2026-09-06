@@ -344,7 +344,22 @@ def create_agent_app(
             if before_result.state_patch:
                 _merge_hook_state_patch(state_updates, before_result.state_patch)
             if before_result.messages_patch:
-                msgs_for_llm = list(msgs_for_llm) + list(before_result.messages_patch)
+                # 治理中间件可能用 RemoveMessage 表示"移除过期历史"：
+                # 它绝不能作为普通消息发给模型（langchain 转换会失败）。
+                # 拆成 移除指令（经 state_updates 由状态机执行）+ 真正追加的消息。
+                patch_removes = [m for m in before_result.messages_patch
+                                 if isinstance(m, RemoveMessage)]
+                patch_adds = [m for m in before_result.messages_patch
+                              if not isinstance(m, RemoveMessage)]
+                if patch_removes:
+                    rm_ids = {m.id for m in patch_removes if m.id}
+                    msgs_for_llm = [
+                        m for m in msgs_for_llm
+                        if getattr(m, "id", None) not in rm_ids
+                    ]
+                    state_updates.setdefault("messages", []).extend(patch_removes)
+                if patch_adds:
+                    msgs_for_llm = list(msgs_for_llm) + list(patch_adds)
 
         # 通过中间件管道调用LLM
         ctx = MiddlewareContext(

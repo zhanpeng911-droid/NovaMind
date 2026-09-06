@@ -39,8 +39,18 @@ class CallRecord:
     input_tokens: int | None = None
     output_tokens: int | None = None
     estimated_cost: float = 0.0
+    reserved_yuan: float = 0.0   # 该笔调用预留金额（unknown 时保留为风险）
     request_id: str | None = None
     error: str | None = None
+
+
+def _is_finite_positive(value: float) -> bool:
+    """有限且为正的数值（拒绝 NaN/±inf/≤0）。"""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return False
+    return f > 0 and f == f and f not in (float("inf"), float("-inf"))
 
 
 class BudgetController:
@@ -53,11 +63,20 @@ class BudgetController:
 
     def __init__(self, cap_yuan: float, *, price: dict | None = None,
                  calls_log: str | None = None):
+        # 金额/单价必须是有限有效数：拒绝 NaN/无穷/非正预算与无效价格
+        if not _is_finite_positive(cap_yuan):
+            raise ValueError(f"预算必须为正有限数，收到 {cap_yuan!r}")
+        if price is None:
+            price = dict(DEFAULT_PRICE)
+        for key, val in price.items():
+            if not _is_finite_positive(val):
+                raise ValueError(f"单价 {key}={val!r} 无效（须为正有限数）")
         self.cap = float(cap_yuan)
-        self.price = dict(price or DEFAULT_PRICE)
-        self.spent = 0.0          # 已结算
-        self.pending = 0.0        # 在途预留（含 unknown 保守上界）
-        self.unknown_usage = 0    # 无法计量次数
+        self.price = dict(price)
+        self.spent = 0.0           # 已结算
+        self.pending = 0.0         # 预留中：在途 + 已结束但费用未知
+        self.unknown_usage = 0     # 无法计量次数
+        self.unknown_reserved = 0.0  # 已结束但费用未知的保留风险金额
         self.calls_log = calls_log
         self._lock = threading.Lock()
         self._log_handle = None
@@ -83,16 +102,27 @@ class BudgetController:
             return reserve
 
     def settle(self, record: CallRecord, reserve: float = 0.0) -> float:
-        """调用结束结算：按真实 usage 回写花费，释放该笔预留差额。
+        """调用结束结算。
 
-        unknown usage（无 usage_metadata）按保守上界处理：预留不释放
-        （保留在 pending 作为未知风险），并单独计数。"""
-        cost = estimate_cost(record.input_tokens, record.output_tokens, self.price)
+        完整 usage（输入+输出均有效）：按真实费用记账，释放该笔预留
+        （只释放一次）；实际费用超过预留时如实记账、不截断到预算内
+        （后续准入因 spent 已高而被拒绝）。
+
+        usage 缺失/部分缺失/无法确认：**不按免费处理**——保留该笔预留
+        作为风险金额（pending 不释放），计入 unknown 并记录预留值；
+        报告明确 pending 包含“仍在途”与“已结束但费用未知”。"""
+        complete = (record.input_tokens is not None
+                    and record.output_tokens is not None)
+        cost = (estimate_cost(record.input_tokens, record.output_tokens,
+                              self.price) if complete else 0.0)
         with self._lock:
-            if record.input_tokens is None or record.output_tokens is None:
+            if not complete:
                 self.unknown_usage += 1
-            self.pending = max(0.0, self.pending - reserve)
-            self.spent += cost
+                self.unknown_reserved += reserve
+                # pending 保留该笔预留（不释放），后续准入将其计入占用
+            else:
+                self.pending = max(0.0, self.pending - reserve)
+                self.spent += cost
         record.estimated_cost = cost  # 回写供 calls.jsonl 记录
         self._log(record)
         return cost
@@ -109,6 +139,7 @@ class BudgetController:
             "input_tokens": record.input_tokens,
             "output_tokens": record.output_tokens,
             "estimated_cost_yuan": round(record.estimated_cost, 6),
+            "reserved_yuan": round(record.reserved_yuan, 6),
             "request_id": record.request_id,
             "error": record.error,
         }
@@ -131,6 +162,7 @@ class BudgetController:
                 "spent_yuan": round(self.spent, 6),
                 "pending_yuan": round(self.pending, 6),
                 "unknown_usage": self.unknown_usage,
+                "unknown_reserved_yuan": round(self.unknown_reserved, 6),
             }
 
 
@@ -179,6 +211,7 @@ class SseParser:
 
     def __init__(self):
         self._buf = ""
+        self.bad_frames = 0   # 无法解析的 data 帧计数（坏 JSON）
 
     def feed(self, chunk: str) -> list[SseFrame]:
         self._buf += chunk
@@ -196,6 +229,7 @@ class SseParser:
             try:
                 payload = json.loads("".join(data_lines))
             except (json.JSONDecodeError, ValueError):
+                self.bad_frames += 1  # 坏帧不静默跳过后算全成功
                 continue
             if isinstance(payload, dict):
                 frames.append(SseFrame(payload.get("type", ""), payload))

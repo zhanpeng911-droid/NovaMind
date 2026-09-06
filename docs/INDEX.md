@@ -12,6 +12,7 @@ Start here, then drill down by topic:
 - NEXT_HARDENING_IMPLEMENTATION_PLAN.md: executable plan for wiring the sandbox into the default tool path and hardening WebUI concurrency, lifecycle, pagination, and API boundaries.
 - FINALIZATION_REPAIR_DESIGN.md: follow-up design for atomic turn persistence, visible frontend failures, and bounded monitor updates after review of df8aa03.
 - REAL_MODEL_LOAD_TEST_PLAN.md: real-provider load-test design covering isolation, cost controls, SSE metrics, staged workloads, and desktop acceptance criteria; execution pending.
+- PERSONAL_USE_FINALIZATION_PLAN.md: current lightweight follow-up scope for personal local use; budget safeguards, benchmark corrections, and five workflow checks instead of full load-test acceptance.
 
 Rules for agents:
 
