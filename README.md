@@ -283,6 +283,11 @@ novamind doctor --json                       # 运行时自检
 
 **真实 Docker smoke（opt-in）**：`uv run --no-sync pytest tests/functional/test_docker_smoke.py -v`——验证创建、挂载区写入/读回、release/reacquire、拒绝 mount 外写；docker daemon 或 `novamind-sandbox:latest` 镜像不可用时自动 skip（仓库尚无镜像定义，Docker 未列入默认运行模式）。
 
+**真实模型压测（opt-in，手动启用）**：`tests/performance/` 提供隔离实例启动器
+与 SSE 压测客户端（预算保护、调用级 usage、闭环并发阶梯）。运行前必须确认
+供应商/模型与金额上限（见 `docs/REAL_MODEL_LOAD_TEST_PLAN.md`），默认不接入
+CI、不进入普通 pytest；命令见 `tests/performance/README.md`。
+
 - **Python**：3.12–3.13（CI 矩阵同版本；3.14 因 langchain-openai 导入期 SSL 崩溃暂排除）
 - **覆盖率**：全量约 81%，CI 底线 `--cov-fail-under=78`，只升不降
 - **规范**：修 bug 必须附带可复现的回归测试随同一提交；新模块合入自带测试；

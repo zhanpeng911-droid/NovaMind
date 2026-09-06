@@ -54,3 +54,6 @@ htmlcov/
 
 # 内部 agent 工作目录（会话记忆，不公开）
 .workbuddy/
+
+# 真实模型压测运行产物（隔离 workspace / 调用日志 / 报告）
+tests/performance/.run/

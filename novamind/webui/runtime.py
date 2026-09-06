@@ -30,14 +30,20 @@ def _capacity_from_env(env_key: str, default: int) -> int:
 
 
 class WebRuntime:
-    """单进程 Web 运行时：组件所有权集中在一处，关闭顺序确定。"""
+    """单进程 Web 运行时：组件所有权集中在一处，关闭顺序确定。
+
+    llm 可选注入（压测/测试用）：提供时用固定模型构造 Agent（经
+    model_router），主回复与辅助调用（摘要/记忆/治理）共用同一实例；
+    None 时按环境配置走 get_provider，行为不变。"""
 
     def __init__(self, max_concurrent: int | None = None,
-                 shutdown_timeout: float | None = None):
+                 shutdown_timeout: float | None = None,
+                 llm: Any = None):
         self._init_lock = asyncio.Lock()
         self._agent: Any = None
         self._history_store: ConversationStore | None = None
         self._skill_store: Any = None
+        self._llm = llm
         self.capacity = asyncio.Semaphore(
             max_concurrent or _capacity_from_env("NOVAMIND_WEB_MAX_MODELS", 4)
         )
@@ -65,6 +71,19 @@ class WebRuntime:
                 )
                 from novamind.core.provider import get_provider
                 from novamind.webui.server import _load_env
+
+                if self._llm is not None:
+                    # 固定模型注入：主回复 + 辅助调用共用同一 llm
+                    llm = self._llm
+
+                    class _SingleModelRouter:
+                        def build_model(self, role):
+                            return llm
+
+                    return create_agent_app(
+                        model_router=_SingleModelRouter(),
+                        middlewares=build_default_middlewares(llm),
+                    )
 
                 provider, model = _load_env()
                 llm = get_provider(provider_name=provider, model_name=model)

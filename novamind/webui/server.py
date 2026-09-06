@@ -108,14 +108,22 @@ def _resolve_env_path() -> Path:
 # ── WebRuntime 单例（lifespan 创建；模块级访问器保持测试兼容） ────────────
 
 _runtime: WebRuntime | None = None
+# 可选 runtime 工厂（压测/测试注入固定模型与调用保护；None 时用默认）
+_runtime_factory: Any = None
 
 
 def get_runtime() -> WebRuntime:
     """返回当前运行时；lifespan 之外（如单元测试直调）按需补建。"""
     global _runtime
     if _runtime is None:
-        _runtime = WebRuntime()
+        _runtime = _build_runtime()
     return _runtime
+
+
+def _build_runtime() -> WebRuntime:
+    if _runtime_factory is not None:
+        return _runtime_factory()
+    return WebRuntime()
 
 
 def get_agent() -> Any:
@@ -245,7 +253,7 @@ class BodyLimitMiddleware:
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     global _runtime
-    _runtime = WebRuntime()
+    _runtime = _build_runtime()
     app.state.runtime = _runtime
     try:
         yield
