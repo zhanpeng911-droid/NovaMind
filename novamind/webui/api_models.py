@@ -13,7 +13,7 @@ import binascii
 import json
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 _CURSOR_VERSION = "v1"
 
@@ -74,6 +74,7 @@ class DeleteResponse(BaseModel):
 
 
 class SkillItem(BaseModel):
+    skill_id: str
     name: str
     description: str
     selections: int
@@ -91,6 +92,17 @@ class SkillsResponse(BaseModel):
     pagination: PaginationMeta | None = None
     # store 故障时的兼容字段（契约：错误 payload 而非 500）
     error: str | None = None
+
+
+class SkillEnabledRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: StrictBool
+
+
+class SkillEnabledResponse(BaseModel):
+    skill_id: str
+    enabled: bool
 
 
 class MonitorSessionItem(BaseModel):

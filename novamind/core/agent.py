@@ -148,6 +148,7 @@ def create_agent_app(
     middlewares: list | None = None,
     model_router=None,
     sandbox_provider: SandboxProvider | None = None,
+    extra_tools: list | None = None,
 ):
     """
     创建NovaMind智能体应用
@@ -164,6 +165,7 @@ def create_agent_app(
             未显式给出时经 build_default_sandbox_provider() 创建）。显式传入
             （包括 []）时不注入沙箱四件套、不自动挂 SandboxMiddleware。
         checkpointer: 保留兼容性参数（不再使用）
+        extra_tools: 产品入口追加的工具；不替换默认工具集。
         token_tracker: Token追踪器实例
         audit_logger: 审计日志器实例
         middlewares: 横切中间件列表（None则使用默认空管道，保持向后兼容）
@@ -212,6 +214,10 @@ def create_agent_app(
         )
     else:
         actual_tools = tools
+
+    # Product-specific tools can be added without replacing the default toolset.
+    if extra_tools:
+        actual_tools = list(actual_tools) + list(extra_tools)
 
     # 多 Agent 接线：委派工具存在时自动挂 OrchestrationMiddleware
     # （set_current_state 共享沙箱透传 + delegate_to_* 打点），调用方已给则不重复

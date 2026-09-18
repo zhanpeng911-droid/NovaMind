@@ -205,9 +205,12 @@ class SQLiteSkillStore:
         return records, next_cursor
 
     def set_enabled(self, skill_id: str, enabled: bool) -> bool:
-        with self._mu:
-            cur = self._conn.execute("UPDATE skill_records SET enabled=? WHERE skill_id=?", (1 if enabled else 0, skill_id))
-            self._conn.commit()
+        # Transaction context also rolls back if commit fails.
+        with self._mu, self._conn:
+            cur = self._conn.execute(
+                "UPDATE skill_records SET enabled=?, last_updated=? WHERE skill_id=?",
+                (1 if enabled else 0, _now_iso(), skill_id),
+            )
             return cur.rowcount > 0
 
     def discover(self, dirs: list[Path], origin: str = "IMPORTED") -> list[SkillRecord]:
@@ -234,11 +237,12 @@ class SQLiteSkillStore:
                  1 if record.enabled else 0, _now_iso(), _now_iso()),
             )
             if cur.rowcount == 0:
+                # Discovery refreshes file metadata, not the user's saved switch.
                 self._conn.execute(
                     """UPDATE skill_records SET path=?, content_hash=?, description=?,
-                         allowed_tools=?, enabled=?, last_updated=? WHERE skill_id=?""",
+                         allowed_tools=?, last_updated=? WHERE skill_id=?""",
                     (record.path, record.content_hash, record.description,
-                     json.dumps(list(record.allowed_tools)), 1 if record.enabled else 0,
+                     json.dumps(list(record.allowed_tools)),
                      _now_iso(), record.skill_id),
                 )
             if record.lineage.parent_skill_ids:

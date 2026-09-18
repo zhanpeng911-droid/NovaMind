@@ -29,10 +29,12 @@ DEFAULT_POLICY: dict[str, Any] = {
         "save_user_profile",
         "list_office_files",
         "read_office_file",
+        "load_skill",
         "write_office_file",
         "execute_office_shell",
     ],
     "tool_policies": {
+        "load_skill": {"mode": "read"},
         "read_office_file": {"mode": "read"},
         "list_office_files": {"mode": "read"},
         "write_office_file": {

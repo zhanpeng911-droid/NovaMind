@@ -326,6 +326,7 @@ class TestMonitorEndpoints(unittest.TestCase):
 class TestSkillsEndpoint(unittest.TestCase):
     def test_list_skills(self):
         rec = mock.MagicMock()
+        rec.skill_id = "search-1"
         rec.name = "search"
         rec.description = "Search the web"
         rec.total_selections = 10
@@ -344,6 +345,7 @@ class TestSkillsEndpoint(unittest.TestCase):
             result = asyncio.run(list_skills()).model_dump()
 
         self.assertEqual(result["count"], 1)
+        self.assertEqual(result["skills"][0]["skill_id"], "search-1")
         self.assertEqual(result["skills"][0]["name"], "search")
         self.assertEqual(result["skills"][0]["effective_rate"], 0.6)
 

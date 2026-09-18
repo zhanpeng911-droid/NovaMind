@@ -64,6 +64,10 @@ class WebRuntime:
             if self._closing:
                 raise RuntimeError("server is shutting down")
 
+            # Initialize on the event-loop thread, like the skill endpoints, so
+            # the lazy store cannot be constructed twice during Agent startup.
+            skill_store = self.get_skill_store()
+
             def _build() -> Any:
                 from novamind.core.agent import create_agent_app
                 from novamind.core.middlewares.default_stack import (
@@ -71,6 +75,9 @@ class WebRuntime:
                 )
                 from novamind.core.provider import get_provider
                 from novamind.webui.server import _load_env
+                from novamind.webui.skill_runtime import (
+                    SkillCatalogMiddleware, build_skill_loader,
+                )
 
                 if self._llm is not None:
                     # 固定模型注入：主回复 + 辅助调用共用同一 llm
@@ -82,14 +89,18 @@ class WebRuntime:
 
                     return create_agent_app(
                         model_router=_SingleModelRouter(),
-                        middlewares=build_default_middlewares(llm),
+                        middlewares=build_default_middlewares(llm)
+                        + [SkillCatalogMiddleware(skill_store)],
+                        extra_tools=[build_skill_loader(skill_store)],
                     )
 
                 provider, model = _load_env()
                 llm = get_provider(provider_name=provider, model_name=model)
                 return create_agent_app(
                     provider_name=provider, model_name=model,
-                    middlewares=build_default_middlewares(llm),
+                    middlewares=build_default_middlewares(llm)
+                    + [SkillCatalogMiddleware(skill_store)],
+                    extra_tools=[build_skill_loader(skill_store)],
                 )
 
             # Agent 组装含同步 IO（env/.env 读取、目录创建），隔离到线程池

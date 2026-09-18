@@ -44,6 +44,8 @@ from novamind.webui.api_models import (
     MonitorSessionsResponse,
     PaginationMeta,
     SessionsResponse,
+    SkillEnabledRequest,
+    SkillEnabledResponse,
     SkillsResponse,
     decode_cursor,
     decode_monitor_events_cursor,
@@ -300,6 +302,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 _ERROR_DESCRIPTIONS = {
     400: "非法游标（invalid_cursor）",
+    404: "资源不存在",
     413: "请求体过大",
     415: "媒体类型不支持",
     422: "字段验证失败",
@@ -587,6 +590,7 @@ async def list_skills(limit: int | None = None, cursor: str | None = None):
                             detail="技能库暂不可用，请稍后重试") from None
 
     skills = [{
+        "skill_id": r.skill_id,
         "name": r.name,
         "description": r.description,
         "selections": r.total_selections,
@@ -598,6 +602,26 @@ async def list_skills(limit: int | None = None, cursor: str | None = None):
         "is_active": r.is_active,
     } for r in recs]
     return SkillsResponse(skills=skills, count=total, pagination=pagination)
+
+
+@app.patch("/skills/{skill_id}", response_model=SkillEnabledResponse,
+           responses=_error_responses(404, 422, 500))
+async def update_skill_enabled(skill_id: str, body: SkillEnabledRequest):
+    """Set (not flip) the persisted flag; retrying the same request is safe."""
+    if not skill_id or len(skill_id) > 256:
+        return _error_response(422, "validation_error", "技能标识无效")
+    try:
+        changed = await asyncio.to_thread(
+            get_skill_store().set_enabled, skill_id, body.enabled,
+        )
+    except Exception:
+        request_id = str(uuid.uuid4())
+        logger.exception("skill update failed request_id=%s", request_id)
+        return _error_response(500, "skill_update_failed", "技能状态保存失败，请重试",
+                               request_id=request_id)
+    if not changed:
+        return _error_response(404, "skill_not_found", "技能不存在，请刷新列表")
+    return SkillEnabledResponse(skill_id=skill_id, enabled=body.enabled)
 
 
 @app.get("/sessions", response_model=SessionsResponse,
