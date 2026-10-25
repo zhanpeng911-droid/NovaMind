@@ -152,15 +152,36 @@ async def async_main(thread_id: str | None = None):
 
     # 缺陷#2 修复：默认 CLI 运行时挂载记忆（L4/L5）与上下文治理中间件
     llm = get_provider(provider_name=current_provider, model_name=current_model)
+    from novamind.core.tools.personal_memory import build_memory_tools
+    from pathlib import Path
+    from novamind.core.config import SKILL_DB_PATH, WORKSPACE_DIR
+    from novamind.core.skill import SQLiteSkillStore
+    from novamind.core.skill.learning.service import LearningService
+    from novamind.core.skill.learning.selection import PersonalSkillMiddleware
+    from novamind.webui.skill_runtime import SkillCatalogMiddleware, build_skill_loader
+    skill_store = SQLiteSkillStore(SKILL_DB_PATH)
+    import novamind.core.skill as skill_package
+    skill_store.discover([Path(skill_package.__file__).parent / "builtin_skills"], origin="BUILTIN")
+    from novamind.core.state_machine import ConversationStore
+    from novamind.core.config import DB_PATH
+    history_store = ConversationStore(DB_PATH)
+    learning = LearningService(skill_store, lambda: history_store, Path(WORKSPACE_DIR))
     agent = create_agent_app(
         provider_name=current_provider,
         model_name=current_model,
-        middlewares=build_default_middlewares(llm),
+        middlewares=build_default_middlewares(llm) + [SkillCatalogMiddleware(skill_store, learning.store),
+                                                    PersonalSkillMiddleware(learning.store)],
+        extra_tools=build_memory_tools() + [build_skill_loader(skill_store, learning.store)],
     )
+    agent.commit_observer = learning.observer.submit
 
     try:
         await _run_session(agent, thread_id)
     finally:
+        stopped = await learning.shutdown()
+        if stopped:
+            skill_store.close()
+        history_store.close()
         # Phase 2 ownership：Agent 内部创建的 sandbox provider 由 aclose 关闭
         await agent.aclose()
 

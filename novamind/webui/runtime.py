@@ -43,6 +43,7 @@ class WebRuntime:
         self._agent: Any = None
         self._history_store: ConversationStore | None = None
         self._skill_store: Any = None
+        self._learning: Any = None
         self._llm = llm
         self.capacity = asyncio.Semaphore(
             max_concurrent or _capacity_from_env("NOVAMIND_WEB_MAX_MODELS", 4)
@@ -52,6 +53,10 @@ class WebRuntime:
         )
         self._active_tasks: set[asyncio.Task] = set()
         self._closing = False
+        self._quick_llm: Any = None
+        self._quick_lock = asyncio.Lock()
+        from .live import LiveConversations
+        self.live = LiveConversations()
 
     # ── 组件访问（懒加载） ───────────────────────────────────────────
 
@@ -67,6 +72,7 @@ class WebRuntime:
             # Initialize on the event-loop thread, like the skill endpoints, so
             # the lazy store cannot be constructed twice during Agent startup.
             skill_store = self.get_skill_store()
+            learning = self.get_learning()
 
             def _build() -> Any:
                 from novamind.core.agent import create_agent_app
@@ -78,6 +84,7 @@ class WebRuntime:
                 from novamind.webui.skill_runtime import (
                     SkillCatalogMiddleware, build_skill_loader,
                 )
+                from novamind.core.tools.personal_memory import build_memory_tools
 
                 if self._llm is not None:
                     # 固定模型注入：主回复 + 辅助调用共用同一 llm
@@ -90,8 +97,8 @@ class WebRuntime:
                     return create_agent_app(
                         model_router=_SingleModelRouter(),
                         middlewares=build_default_middlewares(llm)
-                        + [SkillCatalogMiddleware(skill_store)],
-                        extra_tools=[build_skill_loader(skill_store)],
+                        + [SkillCatalogMiddleware(skill_store, learning.store)],
+                        extra_tools=[build_skill_loader(skill_store, learning.store)] + build_memory_tools(),
                     )
 
                 provider, model = _load_env()
@@ -99,13 +106,26 @@ class WebRuntime:
                 return create_agent_app(
                     provider_name=provider, model_name=model,
                     middlewares=build_default_middlewares(llm)
-                    + [SkillCatalogMiddleware(skill_store)],
-                    extra_tools=[build_skill_loader(skill_store)],
+                    + [SkillCatalogMiddleware(skill_store, learning.store)],
+                    extra_tools=[build_skill_loader(skill_store, learning.store)] + build_memory_tools(),
                 )
 
             # Agent 组装含同步 IO（env/.env 读取、目录创建），隔离到线程池
             self._agent = await asyncio.to_thread(_build)
+            from novamind.core.skill.learning.selection import PersonalSkillMiddleware
+            self._agent.middleware_manager.add(PersonalSkillMiddleware(learning.store))
+            self._agent.commit_observer = learning.observer.submit
         return self._agent
+
+    def get_learning(self) -> Any:
+        if self._closing:
+            raise RuntimeError("server is shutting down")
+        if self._learning is None:
+            from pathlib import Path
+            from novamind.core.skill.learning.service import LearningService
+            self._learning = LearningService(self.get_skill_store(), self.get_history_store,
+                                            Path(SKILL_DB_PATH).parent, busy=lambda: self.active_task_count > 0)
+        return self._learning
 
     def get_history_store(self) -> ConversationStore:
         if self._history_store is None:
@@ -130,6 +150,32 @@ class WebRuntime:
         """已创建的 Agent；未初始化时返回 None（不触发懒加载）。"""
         return self._agent
 
+    async def get_quick_llm(self) -> Any:
+        """Quick Action 专用模型：不绑定工具，单次调用。
+
+        优先复用注入的 llm；否则按 .env 构造并缓存，避免每次 Quick 请求重连。
+        """
+        if self._llm is not None:
+            return self._llm
+        if self._quick_llm is not None:
+            return self._quick_llm
+        async with self._quick_lock:
+            if self._quick_llm is not None:
+                return self._quick_llm
+            if self._closing:
+                raise RuntimeError("server is shutting down")
+
+            def _build() -> Any:
+                from novamind.core.provider import get_provider
+                from novamind.webui.server import _load_env
+
+                provider, model = _load_env()
+                return get_provider(provider_name=provider, model_name=model,
+                                    max_tokens=2000, timeout=30, max_retries=0)
+
+            self._quick_llm = await asyncio.to_thread(_build)
+            return self._quick_llm
+
     # ── active task registry ─────────────────────────────────────────
 
     def register_task(self, task: asyncio.Task) -> None:
@@ -152,6 +198,10 @@ class WebRuntime:
     async def shutdown(self) -> None:
         """停止接收新工作 → 有界等待在飞任务 → 取消 → 依序关闭组件。"""
         self._closing = True
+        learning, self._learning = self._learning, None
+        learning_stopped = True
+        if learning is not None:
+            learning_stopped = await learning.shutdown()
 
         if self._active_tasks:
             tasks = [t for t in self._active_tasks if not t.done()]
@@ -165,7 +215,7 @@ class WebRuntime:
                     await asyncio.gather(*pending, return_exceptions=True)
 
         skill_store, self._skill_store = self._skill_store, None
-        if skill_store is not None:
+        if skill_store is not None and learning_stopped:
             try:
                 skill_store.close()
             except Exception:
@@ -184,6 +234,7 @@ class WebRuntime:
             logger.exception("memory shutdown failed")
 
         agent, self._agent = self._agent, None
+        self._quick_llm = None
         if agent is not None:
             try:
                 await agent.aclose()

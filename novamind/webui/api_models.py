@@ -11,7 +11,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
@@ -61,6 +61,9 @@ class HistoryItem(BaseModel):
     role: str
     content: str
     tools: list[str]
+    images: list[str] = Field(default_factory=list)
+    memories: list[dict] = Field(default_factory=list)
+    schedules: list[dict] = Field(default_factory=list)
 
 
 class HistoryResponse(BaseModel):
@@ -119,10 +122,18 @@ class DoctorFinding(BaseModel):
     suggestion: str | None = None
 
 
+class ApplicationInfo(BaseModel):
+    version: str
+    build_time: str | None = Field(description="打包时写入的 UTC 时间；源码或缺失记录为 null")
+    mode: Literal["packaged", "source"]
+    workspace: str
+
+
 class DoctorResponse(BaseModel):
     ok: bool
     counts: dict[str, int]
     findings: list[DoctorFinding]
+    application: ApplicationInfo
 
 
 class MonitorSessionsResponse(BaseModel):
@@ -200,3 +211,118 @@ def decode_monitor_events_cursor(raw: str) -> tuple[int, bool]:
     except InvalidCursorError:
         data = decode_cursor(raw, "monitor_events", {"offset": int})
         return data["offset"], False
+
+
+# ── B1 Memory Center 契约 ─────────────────────────────────────────────
+
+
+class MemoryItem(BaseModel):
+    """一条记忆的治理视图（正文来自 traces.md，状态来自治理索引）。"""
+
+    memory_id: str
+    content: str
+    category: str
+    state: str
+    revision: int
+    source_thread_id: str | None = None
+    source_turn_id: str | None = None
+    model_proposed: bool
+    user_confirmed: bool
+    trust_level: str
+    scope: str
+    created_at: float
+    updated_at: float
+    confirmed_at: float | None = None
+    superseded_by: str | None = None
+
+
+class MemoriesResponse(BaseModel):
+    memories: list[MemoryItem]
+    count: int
+    pagination: PaginationMeta | None = None
+
+
+class MemoryRevisionItem(BaseModel):
+    revision: int
+    from_state: str | None = None
+    to_state: str
+    reason: str | None = None
+    actor: str | None = None
+    created_at: float
+
+
+class MemoryDetailResponse(MemoryItem):
+    revisions: list[MemoryRevisionItem] = Field(default_factory=list)
+
+
+class MemoryEditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str | None = None
+    category: str | None = None
+    scope: str | None = None
+    revision: int
+
+
+class MemoryActionResponse(BaseModel):
+    memory_id: str
+    state: str
+    revision: int
+
+
+class MemorySettings(BaseModel):
+    enabled: bool
+    recall_enabled: bool
+    auto_extract: bool
+    token_budget: int
+
+
+class MemorySettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recall_enabled: StrictBool | None = None
+    auto_extract: StrictBool | None = None
+    token_budget: int | None = None
+
+
+# ── A2 Quick Action 契约 ──────────────────────────────────────────────
+
+
+class QuickActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["translate", "explain", "summarize"]
+    text: str = Field(min_length=1, max_length=20000)
+    target_language: str | None = None
+    style: str | None = None
+    images: list[str] = Field(default_factory=list, max_length=3)
+    memory_mode: Literal["normal", "no_record", "private"] = "normal"
+    scope: str = Field(default="global", min_length=1, max_length=120)
+    reasoning: Literal["auto", "quick", "low", "high", "max"] = "auto"
+
+
+class QuickAck(BaseModel):
+    status: str
+
+
+class QuickSelectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    captured: bool
+    chars: int = 0
+    source_app: str | None = None
+
+
+class QuickEscalateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=20000)
+    session_id: str | None = None
+    answer: str = Field(default="", max_length=80000)
+    images: list[str] = Field(default_factory=list, max_length=3)
+    request_id: str = Field(default="", max_length=64)
+
+
+class QuickEscalateResponse(BaseModel):
+    thread_id: str
+    url: str

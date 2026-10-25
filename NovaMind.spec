@@ -2,20 +2,24 @@
 """NovaMind GUI 打包配置（pyinstaller）。
 
 打包命令：
-    pyinstaller NovaMind.spec
-产物在 dist/ 下。
+    pyinstaller NovaMind.spec --distpath dist-personal-ui --workpath build/personal --noconfirm
+统一桌面产物在 dist-personal-ui/ 下（工作台、悬浮球与助手共用一个程序）。
 """
 
 from pathlib import Path
 
 import os
 import sys
+import runpy
 
 from PyInstaller.utils.hooks import collect_submodules
 
 # 项目根目录：editable 安装的 novamind 包需要 pathex 才能被找到
 # spec 由 pyinstaller exec 执行，无 __file__，用 SPECPATH（spec 文件所在目录）
 PROJECT_ROOT = SPECPATH if "SPECPATH" in dir() else str(Path.cwd())
+runpy.run_path(str(Path(PROJECT_ROOT) / "packaging/build_icons.py"), run_name="__main__")
+_metadata_builder = runpy.run_path(str(Path(PROJECT_ROOT) / "packaging/build_metadata.py"))
+_build_info_path = _metadata_builder["write_build_info"](Path(PROJECT_ROOT))
 
 # Anaconda base 的 DLL（venv 基于 Anaconda 时，标准库 _ctypes/_lzma 等依赖这些）
 _BASE_PREFIX = getattr(sys, "base_prefix", sys.prefix)
@@ -57,6 +61,8 @@ hiddenimports += collect_submodules("langchain_core")
 hiddenimports += collect_submodules("novamind")
 
 datas = [
+    (str(_build_info_path), "novamind/webui"),
+    ("novamind/desktop/assets", "novamind/desktop/assets"),
     ("novamind/webui/static", "novamind/webui/static"),
     ("novamind/core/skill/builtin_skills", "novamind/core/skill/builtin_skills"),
     # 只读资源：doctor 诊断需要 docs/ 与 harness/policies.json
@@ -73,7 +79,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["tkinter", "unittest", "pydoc"],
+    excludes=["tkinter", "unittest", "pydoc", "PySide6", "PyQt6"],
     noarchive=False,
 )
 
@@ -86,6 +92,7 @@ exe = EXE(
     a.datas,
     [],
     name="nova-mind-gui",
+    icon=str(Path(PROJECT_ROOT) / "novamind/desktop/assets/novamind.ico"),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

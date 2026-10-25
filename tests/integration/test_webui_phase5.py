@@ -24,7 +24,7 @@ from novamind.webui.api_models import (
     encode_cursor,
 )
 from novamind.webui.app import _require_loopback_host
-from novamind.webui.server import BodyLimitMiddleware, _stream_chat, app
+from novamind.webui.server import BodyLimitMiddleware, ChatRequest, _stream_chat, app
 
 
 class TestCursorCodec(unittest.TestCase):
@@ -147,7 +147,7 @@ class TestSseDisconnectSemantics(unittest.TestCase):
         async def _run():
             with patch("novamind.webui.server.get_agent", return_value=FakeAgent()):
                 gen = _stream_chat(
-                    type("Req", (), {"message": "hi", "thread_id": "t"})()
+                    ChatRequest(message="hi", thread_id="t")
                 )
                 first = await gen.__anext__()   # thread 帧
                 self.assertIn('"thread"', first)
@@ -172,7 +172,7 @@ class TestSseDisconnectSemantics(unittest.TestCase):
                        return_value=ExplodingAgent()):
                 frames = []
                 async for frame in _stream_chat(
-                    type("Req", (), {"message": "hi", "thread_id": "t"})()
+                    ChatRequest(message="hi", thread_id="t")
                 ):
                     frames.append(frame)
                 return frames
@@ -352,7 +352,9 @@ class TestOpenApiContractFixes(unittest.TestCase):
         ref = schema.get("$ref", "")
         self.assertIn("DoctorResponse", ref)
         model = self.schema["components"]["schemas"]["DoctorResponse"]
-        self.assertEqual(set(model["properties"].keys()), {"ok", "counts", "findings"})
+        self.assertEqual(set(model["properties"].keys()), {"ok", "counts", "findings", "application"})
+        application = self.schema["components"]["schemas"]["ApplicationInfo"]
+        self.assertEqual(set(application["properties"]), {"version", "build_time", "mode", "workspace"})
 
     def test_collection_routes_declare_error_model(self):
         for path in ("/sessions", "/history/{thread_id}", "/skills",
@@ -377,7 +379,7 @@ class TestSseErrorFrameNoLeak(unittest.TestCase):
                        return_value=ExplodingAgent()):
                 frames = []
                 async for frame in _stream_chat(
-                    type("Req", (), {"message": "hi", "thread_id": "t"})()
+                    ChatRequest(message="hi", thread_id="t")
                 ):
                     frames.append(frame)
                 return frames

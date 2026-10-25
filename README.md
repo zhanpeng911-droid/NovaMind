@@ -1,18 +1,20 @@
 # NovaMind
 
-> **一个可审计的深度研究 Agent 内核。** 不是又一个套壳聊天机器人。
+> **面向工作、学习和日常生活的个人 Agent，深度研究是其优化方向。** 保留可审计内核、工具、技能与沙箱能力。
 
-NovaMind 把"Agent 怎么设计"这件事拆到了每个模块都能独立验证的程度——614 个 Pytest 用例守着每一层。它吸收了 Poirot 的内核精华（横切中间件、五层记忆、三组件沙箱、三层技能自进化、多 Agent 共享沙箱、token 预算治理），同时保留了自研编排、零信任边界、可审计可追溯的看家本领。
+NovaMind 沿用自研编排、横切中间件、五层记忆、三组件沙箱、技能与 token 预算治理。在同一个桌面程序里提供工作台、悬浮球、图片对话、个人记忆和日程提醒。功能范围见 [Personal Agent 实施说明](docs/PERSONAL_AGENT_IMPLEMENTATION.md)，旧轮次实测见 [GUI 优化记录](docs/GUI_REFINEMENT_REPORT.md)；最新个人使用优化、Pillow 13 升级和实际验证见 [迭代记录](docs/ITERATION_POLISH_2026-10-24.md)，剩余依赖风险见 [审计记录](docs/DEPENDENCY_AUDIT_2026-10-22.md)。
+
+新增**从日常任务沉淀个人技能**：在个人设置开启本地观察，技能页选取重复任务示例、整理和审阅方法，明确批准后按需使用。观察不追加模型调用；模型整理与文本行为验证需单独确认预算。候选、试用与有限验证分开显示，支持版本回退和来源撤销。实现与实际验证见 [交付记录](docs/PERSONAL_SKILL_EVOLUTION_DELIVERY_2026-10-25.md)，真实模型学习效果尚未验收。
 
 🧠 **自研编排 + 横切中间件** 不是把所有逻辑塞进 agent loop，而是保留自研异步状态机（`agent → tools → agent` 条件路由），把记忆召回、技能注入、沙箱生命周期、工具执行、上下文治理全部拆成可插拔中间件——`before_agent / after_agent / before_model / after_model / wrap_tool_call` 五个钩子各司其职。加一个功能 = 加一个 middleware，不动核心循环。`app → agents` 依赖严格单向，跨层用 Protocol 破循环依赖。
 
-🧬 **五层长期记忆系统** 从 Schema 到自动沉淀，五层各管各的：L1 frozen dataclass + 原子操作（工具里无 LLM，纯数据变换）；L2 艾宾浩斯衰减公式懒计算（strength 在检索时才算，无后台任务扫表）；L3 Markdown 单文件做 truth source + BM25 检索命中后自动强化写回（retrieve 完成后 `store.update` 提升 strength，下次更容易召回），中文记忆自动切 jieba 分词；L4 per-call HumanMessage 注入（不碰 system prompt cache）；L5 后台 daemon 线程非阻塞沉淀——worker 调 LLM 从对话抽取 episodic 记忆入库，累积够量后合并为 semantic 知识，旧 trace 标 forgotten 被 retriever 过滤。记忆跨 thread 持久化，换会话不丢。
+🧬 **受控个人记忆** 保留五层结构、Markdown 痕迹和检索能力，增加统一的候选/确认/禁用/删除与版本屏障。明确保存的偏好可跨会话使用；自动抽取仅生成候选，不自动替换用户已确认记忆。旧画像经受控迁移后不再绕过记忆中心独立注入。全局开关、私密模式和项目范围接入实际召回/写入链路。
 
 🤝 **多 Agent 编排 + 共享沙箱设计** pi CLI 在 PATH 时自动挂载 `delegate_to_pi` 委派工具——LLM 只需给出 goal + success_criteria，pi（自带模型与 ReAct loop）执行后回传结构化三段式结果（What You Did / Success / Gaps），provider/model 经环境变量配置，实测中文多步任务端到端跑通。共享沙箱是保留的设计方向：`PerSubagentBinder` 让 subagent 复用父 `sandbox_id` 不各开沙箱（pi 侧容器透传待其上游支持 `--sandbox-url` 后收敛）。上面还叠了 L2 演化层（`effective_rate` 跌破阈值 → IVEFocuser 诊断 → LLMMutator 变异 → ScoreDeltaGate 门槛 → GitRatchet 棘轮自动回滚）和 L3 评估层（执行判定 + 四维任务质量打分 + 响应契约检查，RuntimeTracker 监控 applied-rate 退化信号回灌 L2）。
 
 🛡️ **沙箱三组件 + 零信任 + 产物落盘** 三组件设计：Runtime（裸执行）+ PathTranslator（路径翻译/脱敏）+ SecurityGuard（安全校验），切沙箱只换组件不改编排。Local 模式保留零信任底座——shell 元字符/环境变量拦截 + 命令白名单 + 路径穿越拒绝；Docker 模式强制写入/重定向目标必须落在 `/mnt/novamind/user_data/` 挂载区。配合 warm pool 预热池（减少冷启动）、idle auto-destroy（空闲自动销毁）、cross-process lock（多实例并发安全）、WSL2 executor（`D:\foo` → `/mnt/d/foo` 路径翻译），Windows + WSL2 + Docker 三层环境也能跑通。
 
-📐 **上下文治理 + 三层技能自进化** token 预算穿透 FallbackChatModel 拿真实窗口大小（不是硬编码 200K，而是解析到内层模型名动态查表），fraction 分母准确了 P5 熔断阈值才准。技能系统三层：L1 SQLite 存储 + 版本 DAG + 四计数器（selections/applied/completions/fallbacks）+ quality filter + LLM hybrid 选择；L2 自进化——MetricMonitor 监控 effective_rate 跌破阈值时触发，IVEFocuser 五问诊断偏差，LLMMutator 重写技能文本，ScoreDeltaGate 确保变异后分数更高才通过，GitRatchet 棘轮机制自动回滚退化；L3 三层评估——SkillJudgmentAnalyzer 逐技能逐任务判定是否被应用，TaskQualityJudge 四维加权打分（准确度 0.50 / 完整性 0.35 / 效率 0.05 / 深度 0.10），ResponseContractChecker 从技能文本提取契约规则检查响应合规，RuntimeTracker 跟踪 applied-rate 趋势把退化信号回灌 L2 触发再进化。
+📐 **上下文治理与个人技能学习**：token 预算治理、SQLite 技能目录、版本血缘和四计数器保留。原有 MetricMonitor、LLMMutator、ScoreDeltaGate、GitRatchet 等演化组件可供编排，不能据此宣称默认日常路径已经自动持续进化。新接线的个人方法学习走提交后观察、候选整理、独立验证状态和用户批准发布；新正文按调用临时注入。静态契约检查与实际任务效果分开，首版行为评估仅覆盖明确列出的文本约束，候选不会自动启用。
 
 > 一句话：不是在做功能堆砌，是在认真回答"一个 Agent 内核应该长什么样"——而且还要跑得可信、可追责。
 
@@ -34,7 +36,7 @@ NovaMind 把"Agent 怎么设计"这件事拆到了每个模块都能独立验证
 | **五层长期记忆** | Schema → 衰减遗忘 → BM25 检索（含 jieba 中文分词）→ per-call 注入 → 后台沉淀，跨会话持久化。 |
 | **三组件沙箱** | Runtime + PathTranslator + SecurityGuard；Local 零信任白名单 + Docker 路径强制；warm pool + idle destroy + 跨进程锁 + WSL2。 |
 | **上下文治理** | token 预算穿透真实窗口 + P0-P5 分段舍弃（externalize / summarize / snapshot / 熔断）。 |
-| **三层技能自进化** | SQLite+DAG+四计数器 → 变异 → 四维评估 → 棘轮回滚；37 个内置技能（全英文）。 |
+| **技能与个人方法学习** | SQLite + 版本血缘 + 四计数器；37 个内置技能附中文介绍；个人方法从重复任务整理为候选，审阅后试用/启用，支持回退。 |
 | **多 Agent 委派** | `delegate_to_pi` 自动接线（pi 可用时）；provider/model 可配；PerSubagentBinder 共享沙箱设计就绪，subagent fork 协议已定义待接线。 |
 | **CLI + 桌面 GUI + 诊断** | `novamind gui`（pywebview 桌面窗口，WorkBuddy 风格界面）+ `novamind run`（CLI 交互）+ `novamind monitor`（Rich 审计面板）+ `novamind doctor`（架构健康体检 + 退化信号告警）。 |
 | **可审计** | 每个关键步骤产生结构化审计事件（JSONL），零信任策略拦截，全程可追溯。 |
@@ -163,19 +165,21 @@ novamind run             # 命令行交互
 | `novamind config` | 交互式配置向导，写入 `.env`。 |
 | `novamind doctor` | 架构健康体检：分层自检 provider / 记忆 / 技能 / 沙箱 / 中间件 + 退化信号。 |
 | `novamind doctor --json` | 以 JSON 输出诊断结果；适合脚本或 CI，出现错误返回非零退出码。 |
-| `novamind gui` | 启动桌面图形界面（pywebview 窗口，WorkBuddy 风格布局：侧边栏 + 对话区 + 监控/诊断/技能面板）。后端仅绑定 loopback（127.0.0.1/localhost/::1），`0.0.0.0`/LAN IP 在启动前被拒绝；/chat 有并发容量上限（`NOVAMIND_WEB_MAX_MODELS`，默认 4）。 |
+| `novamind gui` | Windows 统一启动工作台、悬浮球、托盘与提醒；包含原聊天/监控/诊断/技能/记忆入口，以及个人设置和日程页。后端仅绑定 loopback，保留本机 API 守卫与并发容量限制。其他系统仍使用原工作台入口。 |
+| `novamind desktop` | Windows 统一桌面的兼容启动命令。默认热键 Ctrl+Shift+Space 打开通用对话；快捷动作是翻译/解释/总结/记录。打包 EXE 无需参数，不再单独启动一套球服务。 |
 | `novamind run` | 交互式 Agent 主循环。 |
 | `novamind run --thread-id demo` | 使用指定 `thread_id` 运行或恢复会话。 |
 | `novamind monitor --list` | 列出可监控的会话。 |
 | `novamind monitor --thread-id demo` | 另开终端实时查看指定会话的审计事件与 Token 信息。 |
 
-GUI 侧边栏内置三个面板（后端接口驱动，非占位）：
+GUI 侧边栏内置四个面板（后端接口驱动，非占位）：
 
 | 面板 | 后端接口 | 展示内容 |
 | --- | --- | --- |
 | 🖥 监控面板 | `/monitor/sessions` + `/monitor/events/{id}` | 会话日志列表 + 审计事件流（工具调用/Token/策略拦截/AI 回复） |
 | 🩺 架构诊断 | `/doctor` | 分层体检报告（error/warning/info 分级 + 健康状态） |
 | 🧩 技能管理 | `/skills` | 37 个内置技能 + 四计数器 + effective_rate |
+| 🧠 记忆中心 | `/memories` + `/settings/memory` | 候选/生效/禁用/拒绝/删除、来源与版本、召回与自动抽取开关（删除走 tombstone，后台抽取不复活） |
 
 ### 推荐的双终端工作流
 
@@ -266,9 +270,8 @@ NovaMind/
 
 ```powershell
 uv sync --extra dev                          # 安装依赖（严格按 uv.lock）
-uv run --no-sync pytest tests -q             # 常规回归 698 个测试
-                                             # （全量收集含 functional 共 ~735；functional 属发布前手动门禁，缺 key 自动跳过）
-node --test tests/integration/chat_logic.test.js  # 前端 SSE 终态行为测试（收尾修复起接入 CI）
+uv run --no-sync pytest tests --ignore=tests/functional -q  # 常规离线回归；真实摘要评估须显式 opt-in
+node --test tests/integration/chat_logic.test.js tests/integration/workspace.test.js
 uv run --no-sync pytest tests/unit -q        # 单元层
 uv run --no-sync pytest tests/integration -q # 集成/端到端层
 uv run --no-sync ruff check novamind entry tests   # Lint（CI 强制）
@@ -289,7 +292,7 @@ novamind doctor --json                       # 运行时自检
 CI、不进入普通 pytest；命令见 `tests/performance/README.md`。
 
 - **Python**：3.12–3.13（CI 矩阵同版本；3.14 因 langchain-openai 导入期 SSL 崩溃暂排除）
-- **覆盖率**：全量约 81%，CI 底线 `--cov-fail-under=78`，只升不降
+- **覆盖率**：2026-10-25 常规回归实测 79.07%，CI 底线 `--cov-fail-under=78` 保持不变
 - **规范**：修 bug 必须附带可复现的回归测试随同一提交；新模块合入自带测试；
   skip 测试注明原因
 
@@ -297,14 +300,21 @@ CI、不进入普通 pytest；命令见 `tests/performance/README.md`。
 
 ```powershell
 pip install pyinstaller
-pyinstaller NovaMind.spec --noconfirm   # 产物 dist/nova-mind-gui.exe（单文件）
+pyinstaller NovaMind.spec --distpath dist-personal-ui --workpath build/personal --noconfirm
+# 唯一桌面交付入口：dist-personal-ui/nova-mind-gui.exe（单文件）
 ```
 
-> 注意：在 WorkBuddy 沙箱内打包时需先关闭安全删除保护（`CODEBUDDY_SAFE_DELETE_SANDBOX=0` 前缀），否则 pyinstaller 覆盖 `build/` 中间产物会被拦截。打包后的 exe 把运行时数据（对话历史/日志/技能库）持久化到 exe 上一级目录（即项目根），与源码运行共享同一份 `workspace/` 与 `logs/`；`.env` 自动读取项目根那份，无需复制到 `dist/`。
+> 打包前请从托盘退出正在运行的 NovaMind，避免文件占用。统一使用 `dist-personal-ui/`，不再保留旧的 `dist-personal/` 副本。打包后的 exe 把运行时数据（对话历史/日志/技能库）持久化到 exe 上一级目录（即项目根），与源码运行共享同一份 `workspace/` 与 `logs/`；`.env` 自动读取项目根那份，无需复制到打包目录。
 
 ### 测试覆盖
 
-当前 Pytest 共收集 **614 个用例**：**580 个** unit + integration 用例（CI 日常回归），以及 **34 个** functional 用例（发布前手动验收）。它们锁死各层关键不变量：
+2026-10-24 Pillow 13 升级后实测：常规回归 **953 passed / 3 skipped / 2 subtests passed**，覆盖率 **78.56%**；前端 Node **43 passed**，独立工作区离线原生窗口检查 **29 项通过**。未启用真实模型或付费测试，未进行鼠标点击验收；结果不代表跨设备全场景验收。详细边界见 [迭代记录](docs/ITERATION_POLISH_2026-10-24.md)。
+
+2026-10-25 个人技能学习实现后：**982 passed / 3 skipped / 2 subtests passed，覆盖率 79.07%**；Node **45 passed**，Ruff 通过，mypy 原 10 文件及新学习包共 **18 文件通过**，离线原生 **29 项通过**；正式 EXE 包内与隔离启动检查通过。没有真实模型费用或人工鼠标验收；文本约束评估不代表工具执行或事实准确性验证。详情见 [交付记录](docs/PERSONAL_SKILL_EVOLUTION_DELIVERY_2026-10-25.md)。
+
+2026-10-22 GUI 优化轮实测：常规回归 **824 passed / 3 skipped**（真实模型测试未启用），覆盖率 **78.30%**；前端 Node **9 passed**。命令、原生窗口与浏览器检查范围见 [GUI 优化记录](docs/GUI_REFINEMENT_REPORT.md)。这些结果不是供应商识图效果或跨设备全场景验收。
+
+下表说明回归覆盖的领域：
 
 | 层 | 覆盖不变量 |
 | --- | --- |

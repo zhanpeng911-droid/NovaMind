@@ -254,9 +254,25 @@ def run_gui_command(
         )
         raise typer.Exit(code=1) from None
 
+    if sys.platform == "win32":
+        from novamind.desktop.shell import DesktopShell
+        raise typer.Exit(code=DesktopShell(port=port).run())
     from novamind.webui.app import run_gui
-
     run_gui(port=port)
+
+
+@app.command("desktop")
+def run_desktop_command(
+    port: int = typer.Option(8765, "--port", "-p", help="后端监听端口"),
+):
+    """启动桌面快捷助手（托盘 + 悬浮球 + 全局热键 + 轻量面板）"""
+    load_dotenv(ENV_PATH)
+    try:
+        from novamind.desktop.shell import DesktopShell
+    except ImportError as exc:
+        console.print(f"[bold red]启动失败：{exc}[/bold red]")
+        raise typer.Exit(code=1) from None
+    raise typer.Exit(code=DesktopShell(port=port).run())
 
 
 @app.command("monitor")

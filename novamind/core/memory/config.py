@@ -24,6 +24,7 @@ class MemoryConfig:
     storage_path: str = "memory_traces"      # Markdown 持久化根（truth source，总在；相对路径按统一数据根解析）
     enable_recall: bool = True                 # before_model 召回（L4）
     enable_extract: bool = False               # after_model 实时抽取（默认关，走 L5）
+    enable_auto_extract: bool = True           # L5 自动候选抽取开关（B1 Memory Center）
     token_budget: int = 2000                   # 召回注入 token 上限
     decay: dict[str, Any] = field(default_factory=lambda: {
         "episodic": {"base_strength": 0.7, "decay_rate": 0.1},
@@ -53,7 +54,11 @@ _config_lock = threading.Lock()
 
 def get_memory_config() -> MemoryConfig:
     with _config_lock:
-        return _memory_config
+        from dataclasses import replace
+        from ..personal import settings
+        current = settings()["memory"]
+        return replace(_memory_config, enable_recall=current["recall_enabled"],
+                       enable_auto_extract=current["auto_extract"], token_budget=current["token_budget"])
 
 
 def set_memory_config(config: MemoryConfig) -> None:

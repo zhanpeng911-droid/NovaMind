@@ -1,0 +1,41 @@
+.markdown-body {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.8;
+}
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body > :last-child { margin-bottom: 0; }
+.markdown-body p { margin: 0 0 .85em; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3,
+.markdown-body h4, .markdown-body h5, .markdown-body h6 {
+  margin: 1.3em 0 .55em;
+  font-weight: 650;
+  line-height: 1.45;
+  color: var(--text);
+}
+.markdown-body h1 { font-size: 1.6em; }
+.markdown-body h2 { font-size: 1.4em; }
+.markdown-body h3 { font-size: 1.2em; }
+.markdown-body h4, .markdown-body h5, .markdown-body h6 { font-size: 1em; }
+.markdown-body strong { font-weight: 650; }
+.markdown-body ul, .markdown-body ol { margin: .65em 0 1em; padding-left: 1.7em; }
+.markdown-body li { margin: .3em 0; padding-left: .15em; }
+.markdown-body li > ul, .markdown-body li > ol { margin: .25em 0; }
+.markdown-body li > p { margin: .5em 0; }
+.markdown-body li::marker { color: var(--dim); }
+.markdown-body a { color: var(--teal); text-decoration: underline; text-underline-offset: 3px; }
+.markdown-body a:hover { text-decoration-thickness: 2px; }
+.markdown-body a:focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; border-radius: 2px; }
+.markdown-body blockquote { margin: 1em 0; padding: .2em 1em; border-left: 3px solid var(--border-strong); color: var(--dim); }
+.markdown-body blockquote > :last-child { margin-bottom: 0; }
+.markdown-body code { font-family: var(--mono, ui-monospace, Consolas, monospace); font-size: .9em; padding: .12em .35em; border-radius: 4px; background: var(--surface-2); }
+.markdown-body pre { max-width: 100%; overflow-x: auto; margin: 1em 0; padding: 13px 15px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); font: .9em/1.7 var(--mono, ui-monospace, Consolas, monospace); white-space: pre; overflow-wrap: normal; word-break: normal; }
+.markdown-body pre code { padding: 0; border: 0; border-radius: 0; background: transparent; font: inherit; white-space: pre; overflow-wrap: normal; word-break: normal; }
+.markdown-body table { display: block; max-width: 100%; overflow-x: auto; margin: 1em 0; border-collapse: collapse; font-size: .95em; }
+.markdown-body th, .markdown-body td { padding: .55em .8em; border: 1px solid var(--border); text-align: left; }
+.markdown-body th { background: var(--surface); font-weight: 600; }
+.markdown-body hr { margin: 1.4em 0; border: 0; border-top: 1px solid var(--border); }
+.markdown-body img { display: block; max-width: 100%; height: auto; margin: .8em auto; border-radius: 8px; }
+.quick-error-note { color: var(--red); border-left: 2px solid var(--red); padding-left: 10px; margin-top: 10px; }

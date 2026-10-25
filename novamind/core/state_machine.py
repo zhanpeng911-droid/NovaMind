@@ -127,20 +127,35 @@ class ConversationStore:
         """消息 → SQLite 行参数（role, content, message_type, message_id,
         tool_calls_json, tool_call_id, name）。"""
         role = msg.type if hasattr(msg, "type") else "unknown"
-        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        content = (msg.content if isinstance(msg.content, str) else
+                   "__novamind_multimodal__:" + json.dumps(msg.content, ensure_ascii=False))
         message_id = getattr(msg, "id", None)
         name = getattr(msg, "name", None)
         tool_call_id = getattr(msg, "tool_call_id", None)
         tool_calls = None
         if hasattr(msg, "tool_calls") and msg.tool_calls:
             tool_calls = json.dumps(msg.tool_calls, ensure_ascii=False)
-        return (role, content, type(msg).__name__,
+        message_type = type(msg).__name__ + (":multimodal" if isinstance(msg.content, list) else "")
+        personal = {k: v for k, v in msg.additional_kwargs.items()
+                    if k in {"novamind_memories", "novamind_schedules", "reasoning_content"}}
+        if personal:
+            message_type = type(msg).__name__ + ":personal"
+            content = json.dumps({"content": msg.content, "personal": personal}, ensure_ascii=False)
+        return (role, content, message_type,
                 message_id, tool_calls, tool_call_id, name)
 
     @staticmethod
     def _row_to_message(row: tuple) -> BaseMessage | None:
         """SQLite 行（role..name）→ BaseMessage。"""
         role, content, msg_type, msg_id, tool_calls_json, tool_call_id, name = row
+        personal = {}
+        if msg_type.endswith(":personal"):
+            envelope = json.loads(content)
+            content, personal = envelope["content"], envelope["personal"]
+            msg_type = msg_type.removesuffix(":personal")
+        if msg_type.endswith(":multimodal"):
+            content = json.loads(content[len("__novamind_multimodal__:"):])
+            msg_type = msg_type.removesuffix(":multimodal")
         msg = None
         if msg_type == "HumanMessage":
             msg = HumanMessage(content=content)
@@ -157,7 +172,26 @@ class ConversationStore:
             msg = SystemMessage(content=content)
         if msg and msg_id:
             msg.id = msg_id
+        if msg:
+            msg.additional_kwargs.update(personal)
         return msg
+
+    def saved_message_ids(self, thread_id: str, message_ids: list[str]) -> set[str]:
+        """Deduplicate imported turns even after their old in-memory context was trimmed."""
+        if not message_ids:
+            return set()
+        import sqlite3
+        with self._lock:
+            conn = sqlite3.connect(self._db_path)
+            try:
+                placeholders = ",".join("?" for _ in message_ids)
+                rows = conn.execute(
+                    f"SELECT message_id FROM conversations WHERE thread_id = ? AND message_id IN ({placeholders})",
+                    (thread_id, *message_ids),
+                ).fetchall()
+                return {row[0] for row in rows}
+            finally:
+                conn.close()
 
     def save_message(self, thread_id: str, msg: BaseMessage) -> None:
         """保存单条消息到数据库"""
@@ -262,6 +296,31 @@ class ConversationStore:
             finally:
                 conn.close()
 
+    def load_learning_text(self, thread_id: str, message_ids: list[str]) -> list[str]:
+        """Read only explicitly selected, committed public messages with hard bounds."""
+        import sqlite3
+        identifiers = list(dict.fromkeys(message_ids))[:12]
+        if not identifiers:
+            return []
+        with self._lock, sqlite3.connect(self._db_path) as conn:
+            rows = conn.execute(
+                "SELECT role,substr(content,1,20000),message_type FROM conversations WHERE thread_id=? AND message_id IN ("
+                + ",".join("?" for _ in identifiers) + ") AND role IN ('human','ai') ORDER BY id LIMIT 12",
+                [thread_id, *identifiers]).fetchall()
+        result = []
+        for role, text, message_type in rows:
+            try:
+                if message_type.endswith(":personal"):
+                    text = json.loads(text)["content"]  # Never include reasoning_content.
+                elif text.startswith("__novamind_multimodal__:"):
+                    text = json.loads(text.split(":", 1)[1])
+                if isinstance(text, list):
+                    text = " ".join(p.get("text", "") for p in text if isinstance(p, dict) and p.get("type") == "text")
+                result.append(f"[{role}] {str(text)[:2000]}")
+            except (ValueError, KeyError, TypeError):
+                result.append("[片段过长或不可解析，未读取隐藏信息]")
+        return result
+
     def load_message_page(
         self,
         thread_id: str,
@@ -357,6 +416,13 @@ class ConversationStore:
         rows = rows[:limit]
         items = []
         for thread_id, cnt, last_ts, _last_id, first_human in rows:
+            if first_human and first_human.startswith("__novamind_multimodal__:"):
+                try:
+                    blocks = json.loads(first_human[len("__novamind_multimodal__:"):])
+                    if isinstance(blocks, list):
+                        first_human = " ".join(b.get("text", "") for b in blocks if isinstance(b, dict)) or "图片对话"
+                except (ValueError, TypeError):
+                    pass
             title = (first_human[:24] if first_human else "新对话")
             items.append({
                 "thread_id": thread_id,
@@ -579,6 +645,34 @@ class NovaMindAgent:
         # 持久化计数器：记录每个线程已保存的消息数量，避免全量加载
         self._persisted_counts: dict[str, int] = {}
         self._max_cached_states = max(1, int(max_cached_states))
+        self.commit_observer: Callable[[dict], None] | None = None
+
+    @staticmethod
+    def _learning_context() -> dict:
+        from .personal import request_context
+        return dict(request_context.get())
+
+    def _observe_commit(self, state: AgentState, thread_id: str, user_msg: HumanMessage, context: dict) -> None:
+        """Best-effort notification only after the conversation transaction commits."""
+        if self.commit_observer is None:
+            return
+        try:
+            start = next(i for i, message in enumerate(state.messages) if message.id == user_msg.id)
+            messages = state.messages[start:]
+            content = user_msg.content
+            text = content if isinstance(content, str) else " ".join(
+                part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text")
+            self.commit_observer({"run_id": context.get("turn_id") or user_msg.id, "thread_id": thread_id,
+                "message_ids": [user_msg.id] + [m.id for m in messages if m.id and m.type == "ai"
+                                and not m.additional_kwargs.get("hide_from_ui")][-3:],
+                "text": text[:4000], "context": context,
+                "evidence": {"tools": list(dict.fromkeys(m.name for m in messages if m.type == "tool"))[:20],
+                             "memory_ids": [m.get("id") for m in state.metadata.get("recalled_memories", [])][:20],
+                             "skills": list(state.metadata.get("learning_used", []))[:3]}})
+        except Exception:
+            # No payload/exception text: observers must never undo a committed turn.
+            import logging
+            logging.getLogger(__name__).warning("learning observation was not accepted")
 
     @property
     def middleware_manager(self) -> MiddlewareManager:
@@ -626,6 +720,7 @@ class NovaMindAgent:
         state = AgentState()
         state.metadata["thread_id"] = thread_id
         state.metadata["iteration"] = 0
+        state.metadata.pop("learning_used", None)
 
         # 从数据库恢复对话历史（跨会话持久化）
         if self._store:
@@ -769,6 +864,7 @@ class NovaMindAgent:
         - 收尾阶段（after 钩子 / 持久化）失败 → 回滚本轮，after 不再补发
           （已经执行过或正在失败中），杜绝重复执行收尾钩子。
         """
+        learning_context = self._learning_context()
         snapshot = self._snapshot_state(state)
         counts_before = self._persisted_counts.get(thread_id, 0)
         user_msg = HumanMessage(content=user_input, id=f"msg_{uuid.uuid4().hex[:12]}")
@@ -848,6 +944,7 @@ class NovaMindAgent:
             # 持久化到数据库
             self._persist_state(thread_id, state)
             finalized = True
+            self._observe_commit(state, thread_id, user_msg, learning_context)
 
             return state
         except BaseException:
@@ -893,12 +990,14 @@ class NovaMindAgent:
         self._running_threads.add(thread_id)
         try:
             state = self._get_or_create_state(thread_id)
+            learning_context = self._learning_context()
             snapshot = self._snapshot_state(state)
             counts_before = self._persisted_counts.get(thread_id, 0)
             user_msg = HumanMessage(content=user_input, id=f"msg_{uuid.uuid4().hex[:12]}")
             state.add_message(user_msg)
             self._mark_pending_persist(state, [user_msg])
             state.metadata["iteration"] = 0
+            state.metadata.pop("learning_used", None)
 
             # 与 run() 相同的一次性收尾状态机：astream 被提前 close
             # （GeneratorExit）或取消时，finally 补发 after_agent 释放沙箱；
@@ -975,6 +1074,7 @@ class NovaMindAgent:
                 state.metadata["visited_edges"] = visited_edges
                 self._persist_state(thread_id, state)
                 finalized = True
+                self._observe_commit(state, thread_id, user_msg, learning_context)
             except BaseException:
                 if turn_done and not finalized:
                     self._rollback_state(state, snapshot)
@@ -1038,6 +1138,33 @@ class NovaMindAgent:
                 self._persisted_counts.pop(thread_id, None)
         finally:
             self._run_coordinator.release_ref(thread_id)
+
+    async def append_history(self, thread_id: str, messages: list[BaseMessage]) -> None:
+        """Import completed quick turns under the same lock as Agent turns."""
+        lock = self._run_coordinator.acquire_ref(thread_id)
+        try:
+            async with lock:
+                state = self._get_or_create_state(thread_id)
+                snapshot = self._snapshot_state(state)
+                known = {m.id for m in state.messages if m.id}
+                if self._store:
+                    known |= await asyncio.to_thread(
+                        self._store.saved_message_ids, thread_id, [m.id for m in messages if m.id],
+                    )
+                imported = [m for m in messages if not m.id or m.id not in known]
+                state.messages.extend(imported)
+                self._mark_pending_persist(state, imported)
+                try:
+                    self._persist_state(thread_id, state)
+                except Exception:
+                    self._rollback_state(state, snapshot)
+                    raise
+        finally:
+            self._run_coordinator.release_ref(thread_id)
+
+    def personal_usage(self, thread_id: str) -> list[dict]:
+        state = self._states.get(thread_id)
+        return copy.deepcopy(state.metadata.get("recalled_memories", [])) if state else []
 
 
 def _apply_result(state: AgentState, result) -> None:

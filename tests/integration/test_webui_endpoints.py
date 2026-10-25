@@ -157,6 +157,7 @@ class _ServerStub:
 
     def __init__(self):
         self.should_exit = False
+        self.started = True
 
 
 class TestFindAvailableUrl(unittest.TestCase):

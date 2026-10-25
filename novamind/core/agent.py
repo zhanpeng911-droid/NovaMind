@@ -47,6 +47,12 @@ def _as_int(value: Any) -> int:
         return 0
 
 
+def _text_content(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return "\n".join(b.get("text", "") for b in value if isinstance(b, dict) and b.get("type") == "text")
+
+
 def _first_int(source: dict[str, Any], keys: tuple[str, ...]) -> int:
     for key in keys:
         value = source.get(key)
@@ -318,7 +324,7 @@ def create_agent_app(
         # 用 .type 字符串而非 isinstance 判定消息类别：
         # 测试进程里 langchain_core.messages 偶发被整体重载，isinstance 会跨"代际"类失败
         latest_user_input = next(
-            (msg.content for msg in reversed(raw_messages)
+            (_text_content(msg.content) for msg in reversed(raw_messages)
              if getattr(msg, "type", None) == "human"),
             "",
         )
@@ -376,10 +382,24 @@ def create_agent_app(
         )
 
         async def _call_llm(mctx: MiddlewareContext):
-            # LLM调用是同步网络IO，隔离到线程池避免阻塞事件循环
-            return await asyncio.to_thread(llm_with_tools.invoke, mctx.messages)
+            # Resolve image data off-loop; await provider IO so cancellation propagates.
+            from .images import resolve_messages
+            from .reasoning import invocation_options
+            model_messages = await asyncio.to_thread(resolve_messages, mctx.messages)
+            return await llm_with_tools.ainvoke(model_messages, **invocation_options(llm_with_tools))
 
         response = await pipeline.execute(ctx, _call_llm)
+        if not response.tool_calls:
+            response.additional_kwargs["novamind_memories"] = [
+                item["id"] for item in state.metadata.get("recalled_memories", [])
+            ]
+            from .personal import request_context
+            from .schedules import list_tasks
+            turn_id = request_context.get().get("turn_id")
+            response.additional_kwargs["novamind_schedules"] = [
+                task["id"] for task in await asyncio.to_thread(list_tasks)
+                if turn_id and task.get("source_id") == turn_id
+            ]
 
         # 横切中间件：after_model 钩子（预算追踪 / P5 熔断 / 记忆沉淀 L5）
         after_ctx = HookContext(state=state, thread_id=thread_id, messages=msgs_for_llm)
@@ -453,7 +473,7 @@ def create_agent_app(
 
         thread_id = state.metadata.get("thread_id", "system_default")
         latest_user_input = next(
-            (msg.content for msg in reversed(state.messages)
+            (_text_content(msg.content) for msg in reversed(state.messages)
              if getattr(msg, "type", None) == "human"),
             "",
         )

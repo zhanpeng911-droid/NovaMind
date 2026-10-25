@@ -103,6 +103,8 @@
     // keep this reference so a conversation repaint never loses the controls.
     if (atHome && footer.parentElement !== slot) slot.appendChild(footer);
     else if (!atHome && footer.parentElement !== document.body) main.after(footer);
+    // Tool pages get the full canvas; the composer/draft remains intact.
+    footer.hidden = !chatVisible;
     document.getElementById('view-title').textContent = atHome ? '首页'
       : chatVisible ? (active ? active.textContent.replace(/^● /, '') : '聊天')
         : (nav ? nav.querySelector('span').textContent : '工作台');

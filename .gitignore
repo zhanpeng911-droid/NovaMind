@@ -35,6 +35,8 @@ workspace/
 # 打包产物
 *.egg-info/
 dist/
+dist-personal/
+dist-personal-ui/
 build/
 
 # IDE 配置

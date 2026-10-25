@@ -1,7 +1,7 @@
 # NovaMind WebUI 内部 API（加固 Phase 4/5 后的实际契约）
 
 本文档描述 GUI 后端（`novamind/webui/server.py`）的内部 API。前端
-`novamind/webui/static/index.html` 是唯一被支持的消费者；所有端点只绑定
+工作台与助手小窗是内置消费者；桌面默认端点只绑定
 loopback，不对网络暴露。
 
 ## 能力状态标记
@@ -61,6 +61,16 @@ FastAPI lifespan 持有 `WebRuntime`：
 DELETE 只对**实际删除失败**返回 500；删除不存在的会话幂等 200
 `{"status":"ok"}`。前端收到成功响应并确认 `status==='ok'` 后才移除列表。
 
+`GET /doctor` 另含 `application` 对象，不改变既有 `ok/counts/findings`：
+
+- `version`：源码取当前 `pyproject.toml` 的项目版本（安装版回退包元数据）；EXE 取打包时嵌入的版本。
+- `build_time`：打包时记录的带时区 UTC ISO 时间；源码运行或构建记录缺失时为 `null`，不使用启动时间或文件修改时间代替。
+- `mode`：`packaged` 或 `source`。
+- `workspace`：当前实际使用的绝对工作区路径，不是 EXE 位置或临时解包目录。
+
+诊断页顶部显示上述信息，时间按本机时区展示并附时区。诊断检查失败时仍保留应用信息；
+构建信息不可用则明确显示“未记录”，源码显示“未打包”。该接口只读，不读取凭据或用户文档内容。
+
 成功响应经 `response_model` 声明（`exclude_none`）；旧顶层字段全部保留，
 分页字段只新增不改名。未知 history/monitor 会话返回 200 空数组；删除未知
 会话幂等返回 `{"status": "ok"}`。
@@ -112,6 +122,14 @@ DELETE 只对**实际删除失败**返回 500；删除不存在的会话幂等 2
 
 ## 技能开关与 GUI 接线 [已实现，待用户验收]
 
+技能列表中的内置技能简介由前端静态中文翻译表展示，原始技能文件、ID、
+`GET /skills` 的 `description` 及模型侧目录不变；不为翻译额外调用模型。
+
+记忆中心读取 `GET /memories?exclude_deleted=true` 时，在分页与计数前排除已删除记录，
+因此删除后卡片会退出当前列表。参数默认 `false`，保留原 API 的全状态查看语义；
+显式筛选 `state=deleted` 可查看删除标记。标记仍保存在治理库中，阻止后台重新写回，
+不会参与模型召回。此变更不删除墓碑、修订审计或其他个人数据。
+
 - `GET /skills` 每项新增 `skill_id`，保留 `enabled`；关闭的技能仍在列表中，
   `count` 仍统计所有 active 版本（不等于已启用数）。
 - `PATCH /skills/{skill_id}` 接收 `{"enabled": true}` 或 `{"enabled": false}`，
@@ -132,9 +150,54 @@ DELETE 只对**实际删除失败**返回 500；删除不存在的会话幂等 2
 
 ## 并发不变量 [已实测]
 
+以下实测描述是原有门禁记录，不代表本轮新增界面功能已经执行验收。
+
 - 同一 thread 的 run/astream/删除互斥（Agent per-thread 协调器）；不同
   thread 并发重叠；
 - 运行中的 thread 状态不参与 LRU 淘汰；
 - 取消/异常/生成器提前关闭路径上，`after_agent` 收尾钩子恰好执行一次，
   沙箱 acquire/release 恰好各一次；
 - 半轮失败（含断连）不落盘：内存状态回滚到轮次开始前。
+
+## 个人桌面增量接口（2026-10-22，本轮未运行测试）
+
+- `POST /chat` 新增可选 `reasoning`（`auto/quick/low/high/max`，默认 auto）、`client_id`（最长 64 字符）与 `source`（workspace/quick），原输入与 SSE 契约保留。思考参数逐次传递；各供应商映射及限制见 [本轮记录](GUI_PERSONAL_POLISH_2026-10-22.md)。
+- `GET /workspace/events` 返回 SSE：先 `snapshot {turns: [...]}`，再 `start/frame/finish/history`。事件含 thread_id、turn_id、client_id；客户端忽略本端重复事件，重连用在途快照恢复。心跳是 SSE 注释；该通道不调用模型，不永久保存聊天副本。
+- `POST /workspace/turns/{turn_id}/cancel` 取消对应在途请求；未知/已结束轮次幂等返回 `{"status":"ok"}`。桌面本机安全守卫照常保护写请求，client_id 不是令牌。
+- `GET /personal/memory-document?scope=global` 返回 `content/revision/path/scope`；并发文件编辑冲突时还返回 `conflict=true/server_content`，不覆盖文件。
+- `PUT /personal/memory-document` 接收 `content`（至多 32000 字符）、64 位十六进制 revision、可选 scope（至多 120 字符），同步原治理条目后返回新文本与版本。每条正文至多 4000 字符；语义非法 422，过期版本 409。不写入候选或墓碑内容。读取可能同步用户直接修改的本地 MEMORY.md；没有外部文件修改时仅更新投影。
+- `DELETE /personal/schedules/{task_id}` 真正移除日程及其投递记录，重复删除成功；与 PATCH cancelled 不同。`ScheduleChange` 新增可选 task_date；空 target_time 配合法日期可改为无具体提醒时刻的待办。
+
+### 2026-10-24 后续修复契约
+
+- `/chat` 和 `/quick/actions` 的模型失败保持稳定 error 形状，根据已识别异常可返回 `model_timeout`、`model_connection_failed`、`model_auth_failed`、`model_rate_limited`、`model_unavailable`、`image_input_invalid` 或 `image_model_rejected`。未知异常保留原 generic fallback code；不会把所有带图失败归因为不支持视觉，也不回显异常正文。
+- `/workspace/events` 的 snapshot 仍使用 `turns`，每个条目可附 `truncated:true`，或有限终态 `finish:{cancelled,error}`。每轮最多 256 帧及 128 KiB UTF-8 帧预算，保留后缀并明确告知省略；慢监听者队列满时发送校正 snapshot。正常结束后客户端从历史校正，刚好溢出的正常结束也保留明确终态。失败/取消只保留最近 8 轮、60 秒的进程内回放；正常成功轮次不加入该终态缓存。未持久化且已省略的片段不会被宣称已恢复。
+- 记忆冲突的 `server_content` 在界面以只读文本展示，保存仍必须通过原有 revision 校验；失败不更新 revision，也不自动覆盖草稿。日程表单将 `target_time` 对应字段称为“事项时间”，预览实际提醒时刻，后端计算与存储契约不变。
+
+本轮回归证据与验证范围见 [迭代记录](ITERATION_POLISH_2026-10-24.md)。
+
+## 个人技能学习（2026-10-25）
+
+实现位于 `learning_routes.py`，前缀 `/personal/learning`，沿用 LocalGuard 和统一 HTTP 错误边界。读取页面、候选、作业不会发起模型调用；请求模型禁止额外字段、非有限金额和无效文本约束。
+
+| 路径 | 主要契约 |
+| --- | --- |
+| GET/PUT `/settings` | 本地观察、最少样本、留存和冷却；PUT 仅更新设置，不启动付费步骤 |
+| GET `/patterns`；GET `/patterns/{id}/sources` | 有界建议与来源预览；来源不是成功证明；预览过滤常见凭据/路径并排除隐藏 reasoning |
+| POST `/patterns/{id}/dismiss` | body 带 revision，拒绝后不重复建议 |
+| GET/POST `/candidates`；GET/PATCH `/candidates/{id}` | 有界列表、创建/阅读/编辑。来源最多 10 条，正文最多 16000 字符；编辑须 revision 并使旧验证失效 |
+| POST `/candidates/{id}/generate` | 用户确认预算后整理一个候选；需要 revision、幂等键和预算，不发布技能 |
+| POST `/candidates/{id}/evaluate` | 用户确认预算后比较文本基线和候选；2–5 个不同输入，每个必须有非空 required 约束；不执行工具 |
+| POST `/candidates/{id}/publish` | revision/hash/expected_base_id/mode/enable/confirmed；trial 与 verified 区分，静态/行为失败不能用试用绕过 |
+| POST `/candidates/{id}/reject` | revision 校验，清理草稿正文并抑制相关重复建议 |
+| GET `/jobs`；GET `/jobs/{id}`；POST `/jobs/{id}/cancel` | 状态、spent、reserved、有限调用计量；轮询不重复排队 |
+| POST `/jobs/{id}/acknowledge-risk?confirmed=true` | 仅对已结束且存在未知费用的作业确认已核对账单；保留未知预留记录，不恢复旧额度 |
+| GET `/usage?thread_id=…`；POST `/feedback` | 实际加载的个人方法与用户反馈；反馈绑定 run_id/skill_id/revision，不以没反馈当成功 |
+| POST `/skills/{id}/rollback?expected_active=…`；DELETE `/skills/{id}` | 只回退有效获准版本，保留开关；撤销停止加载并清理应用管理正文，清理失败保留待处理标记 |
+| DELETE `/observations?confirmed=true` | 明确确认后清理观察并撤销相关派生方法，不删除原始聊天或普通技能 |
+
+候选的 source_scope 与适用 scope 分开。把项目来源整理为 global 方法必须显式 `global_confirmed:true`；不能混合来源范围后默默全局使用。失效来源、过期候选 revision 或基线返回 409，记录不存在为 404，参数验证为 422，未知内部异常不回显正文。
+
+模型作业需要 `budget_yuan/input_price/output_price/provider/model`，金额单位为人民币、单价为人民币/百万 token；不预填未经核对的价格。首版沿用当前已配置的 OpenAI 兼容供应商地址与凭据，不能通过这个入口切换到另一个供应商类型；没有模型 fallback 或自动重试。环境显式禁止技能进化时不调用模型。usage 不全保留风险预留，实际超预留如实记录并停止继续准入。
+
+verified 只表示记录中的有限文本约束通过；前端展示验证覆盖范围，不能把它理解为真实文件/网络操作或事实核验通过。原始设计与实际验收分别见 [设计](PERSONAL_SKILL_EVOLUTION_DESIGN.md) 和 [实现记录](PERSONAL_SKILL_EVOLUTION_DELIVERY_2026-10-25.md)。

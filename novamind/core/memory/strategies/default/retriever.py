@@ -32,6 +32,15 @@ except ImportError:  # pragma: no cover
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
+# 中文停用词：过滤单字/功能词，避免「不」「的」这类高频 token 造成
+# 无关查询误命中（B3 评测暴露：手机电池不耐用 → 误召回「不确定…」）。
+_CJK_STOPWORDS = frozenset(
+    "的 了 是 在 和 与 就 都 也 很 要 有 会 能 我 你 他 她 它 这 那 不 没 "
+    "吗 呢 吧 啊 呀 么 个 之 其 或 及 以 于 对 从 到 被 把 让 给 为 而 但 "
+    "又 还 再 最 更 等 可以 什么 怎么 如何 哪些 哪个 为什么 是否 一个 一下 "
+    "这个 那个 我们 你们 他们 自己 以及 因为 所以 如果 然后".split()
+)
+
 
 class HybridRetriever:
     """纯 BM25 检索器。检索强化写回 + forgotten 过滤 + 增量索引。"""
@@ -133,7 +142,8 @@ class HybridRetriever:
     def _default_tokenize(text: str) -> list[str]:
         # 含中文且 jieba 可用时用 jieba 分词；否则空格分词（英文/回退）
         if _jieba is not None and _CJK_RE.search(text):
-            return [t.strip().lower() for t in _jieba.lcut(text) if t.strip()]
+            tokens = [t.strip().lower() for t in _jieba.lcut(text) if t.strip()]
+            return [t for t in tokens if t not in _CJK_STOPWORDS]
         return text.lower().split()
 
     def on_trace_added(self, trace: MemoryTrace) -> None:

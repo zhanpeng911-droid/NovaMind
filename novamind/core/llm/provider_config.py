@@ -161,6 +161,10 @@ def build_chat_model(config: ProviderConfig):
     if kind == "openai_compat":
         from langchain_openai import ChatOpenAI
 
+        if "deepseek" in config.model.lower() or "api.deepseek.com" in (config.base_url or "").lower():
+            from .deepseek_model import DeepSeekChatModel
+            ChatOpenAI = DeepSeekChatModel
+
         kwargs: dict = {"model": config.model, "api_key": config.api_key}
         if config.base_url:
             kwargs["base_url"] = config.base_url

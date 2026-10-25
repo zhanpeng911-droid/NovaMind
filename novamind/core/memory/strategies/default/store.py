@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
@@ -165,10 +166,17 @@ class MarkdownFileStore:
             f.write(block)
 
     def _rewrite_file(self) -> None:
-        with open(self._traces_file, "w", encoding="utf-8") as f:
-            f.write("# Memory Traces\n\n")
-            for trace in self._traces.values():
-                f.write(f"<!-- trace: {trace.id} -->\n{self._serialize_trace(trace)}\n\n")
+        temporary = self._traces_file.with_suffix(".tmp")
+        try:
+            with open(temporary, "w", encoding="utf-8") as f:
+                f.write("# Memory Traces\n\n")
+                for trace in self._traces.values():
+                    f.write(f"<!-- trace: {trace.id} -->\n{self._serialize_trace(trace)}\n\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, self._traces_file)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def update(self, trace: MemoryTrace) -> None:
         with self._lock:

@@ -19,6 +19,12 @@ from datetime import datetime, timedelta
 from .task_store import TASKS_FILE, TASKS_LOCK, load_tasks_unlocked, write_tasks_unlocked
 
 
+def collect_reminders(*, include_legacy: bool = True) -> list[dict]:
+    """Shared persisted reminder check, called by the desktop lifecycle, without LLM IO."""
+    from .schedules import due_reminders
+    return due_reminders(include_legacy=include_legacy)
+
+
 async def pacemaker_loop(
     task_queue: asyncio.Queue,
     check_interval: int = 10,
@@ -35,6 +41,9 @@ async def pacemaker_loop(
     """
     while True:
         await asyncio.sleep(check_interval)
+        for reminder in collect_reminders(include_legacy=False):
+            # CLI delivery stays independent from the model, just like desktop notices.
+            print(f"\n[日程提醒] {reminder['description']} · {reminder['delivery']['time']}", flush=True)
 
         if not os.path.exists(TASKS_FILE):
             continue
@@ -54,6 +63,9 @@ async def pacemaker_loop(
                 continue
 
             for t in tasks:
+                if t.get("kind") in {"reminder", "todo"}:
+                    pending_tasks.append(t)
+                    continue
                 try:
                     target_dt = datetime.strptime(t["target_time"], "%Y-%m-%d %H:%M:%S")
 

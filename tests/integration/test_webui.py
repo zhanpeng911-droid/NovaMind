@@ -10,6 +10,7 @@ from unittest import mock
 from langchain_core.messages import AIMessage, HumanMessage
 
 from novamind.core.state_machine import ConversationStore
+from novamind.webui.live import LiveConversations
 from novamind.webui.server import (
     ChatRequest,
     _content_str,
@@ -177,6 +178,9 @@ class _FakeRuntime:
         self._agent = agent
         self._store = store
         self.capacity = asyncio.Semaphore(1)
+        self.live = LiveConversations()
+        self.active_tasks = set()
+        self.learning_revocations = []
 
     def agent_if_ready(self):
         return self._agent
@@ -184,14 +188,40 @@ class _FakeRuntime:
     def get_history_store(self):
         return self._store
 
+    def get_learning(self):
+        from types import SimpleNamespace
+
+        def revoke_thread(thread_id):
+            assert self._store.load_messages(thread_id) == [], "learning cleanup must follow durable deletion"
+            self.learning_revocations.append(thread_id)
+
+        return SimpleNamespace(store=SimpleNamespace(revoke_thread=revoke_thread))
+
     def register_task(self, task):
-        pass
+        self.active_tasks.add(task)
 
     def unregister_task(self, task):
-        pass
+        self.active_tasks.discard(task)
 
 
 class TestSessionDeletionConsistency(unittest.TestCase):
+    async def _exercise(self, agent, *, timeout=5):
+        async def consume_stream():
+            async for _ in _stream_chat(ChatRequest(message="continue", thread_id="t1")):
+                pass
+
+        # Propagate child failures to the startup wait; cancel and join every
+        # child before leaving the scenario, including on assertion/timeout.
+        async with asyncio.timeout(timeout):
+            async with asyncio.TaskGroup() as tasks:
+                tasks.create_task(consume_stream())
+                await agent.started.wait()
+                delete_task = tasks.create_task(delete_session("t1"))
+                await asyncio.sleep(0)
+                self.assertFalse(delete_task.done(), "deletion must wait for the active turn")
+                agent.release.set()
+            return delete_task.result()
+
     def test_delete_waits_for_active_chat_then_clears_agent_cache_and_history(self):
         """删除与流式收尾竞态时，不能让旧会话重新写回 SQLite。"""
         with tempfile.TemporaryDirectory() as tmp:
@@ -200,29 +230,90 @@ class TestSessionDeletionConsistency(unittest.TestCase):
             store.save_message("t1", HumanMessage(content="existing message"))
             agent = _BlockingPersistingAgent(store)
 
-            async def exercise():
-                async def consume_stream():
-                    async for _ in _stream_chat(ChatRequest(message="continue", thread_id="t1")):
-                        pass
-
-                stream_task = asyncio.create_task(consume_stream())
-                await agent.started.wait()
-                delete_task = asyncio.create_task(delete_session("t1"))
-                await asyncio.sleep(0)
-                agent.release.set()
-                await stream_task
-                return await delete_task
-
             # Phase 5：组件持有者改为 WebRuntime；补丁 get_agent（流式）
             # 与 get_runtime（删除走 runtime.agent_if_ready）
             fake_runtime = _FakeRuntime(agent, store)
-            with mock.patch("novamind.webui.server.get_agent", return_value=agent),                     mock.patch("novamind.webui.server.get_runtime",
-                               return_value=fake_runtime):
-                response = asyncio.run(exercise()).model_dump(exclude_none=True)
+            with (
+                mock.patch("novamind.webui.server.get_agent", return_value=agent),
+                mock.patch("novamind.webui.server.get_runtime", return_value=fake_runtime),
+            ):
+                response = asyncio.run(self._exercise(agent)).model_dump(exclude_none=True)
 
             self.assertEqual(response, {"status": "ok"})
             self.assertNotIn("t1", agent._states)
             self.assertEqual(store.load_messages("t1"), [])
+            self.assertEqual(fake_runtime.live.active, {})
+            self.assertEqual(fake_runtime.live.tasks, {})
+            self.assertEqual(fake_runtime.learning_revocations, ["t1"])
+            self.assertEqual(fake_runtime.active_tasks, set())
+
+    def test_startup_crash_is_propagated_instead_of_waiting_forever(self):
+        agent = _BlockingPersistingAgent(None)
+        closed = mock.Mock()
+
+        async def crashing_stream(_request):
+            try:
+                raise RuntimeError("stream crashed before startup")
+                yield  # pragma: no cover
+            finally:
+                closed()
+
+        with mock.patch(__name__ + "._stream_chat", new=crashing_stream):
+            with self.assertRaises(ExceptionGroup) as caught:
+                asyncio.run(self._exercise(agent))
+        self.assertEqual(len(caught.exception.exceptions), 1)
+        error = caught.exception.exceptions[0]
+        self.assertIsInstance(error, RuntimeError)
+        self.assertEqual(str(error), "stream crashed before startup")
+        closed.assert_called_once_with()
+        self.assertFalse(agent.started.is_set())
+
+    def test_startup_timeout_cancels_and_joins_stalled_stream(self):
+        agent = _BlockingPersistingAgent(None)
+        closed = mock.Mock()
+        tasks = []
+
+        async def stalled_stream(_request):
+            tasks.append(asyncio.current_task())
+            try:
+                await asyncio.Event().wait()
+                yield  # pragma: no cover
+            finally:
+                closed()
+
+        with mock.patch(__name__ + "._stream_chat", new=stalled_stream):
+            with self.assertRaises(TimeoutError):
+                asyncio.run(self._exercise(agent, timeout=0.1))
+        closed.assert_called_once_with()
+        self.assertEqual(len(tasks), 1)
+        self.assertTrue(tasks[0].cancelled())
+
+    def test_delete_timeout_cancels_and_joins_stalled_deletion(self):
+        agent = _BlockingPersistingAgent(None)
+        closed = mock.Mock()
+        tasks = []
+
+        async def stream(_request):
+            agent.started.set()
+            await agent.release.wait()
+            yield "done"
+
+        async def stalled_delete(_thread_id):
+            tasks.append(asyncio.current_task())
+            try:
+                await asyncio.Event().wait()
+            finally:
+                closed()
+
+        with (
+            mock.patch(__name__ + "._stream_chat", new=stream),
+            mock.patch(__name__ + ".delete_session", new=stalled_delete),
+        ):
+            with self.assertRaises(TimeoutError):
+                asyncio.run(self._exercise(agent, timeout=0.1))
+        closed.assert_called_once_with()
+        self.assertEqual(len(tasks), 1)
+        self.assertTrue(tasks[0].cancelled())
 
 
 class TestListThreads(unittest.TestCase):
@@ -262,6 +353,31 @@ class TestSafeId(unittest.TestCase):
 
 
 class TestDoctorEndpoint(unittest.TestCase):
+    def test_application_info_uses_project_version_and_active_workspace(self):
+        from pathlib import Path
+        import tomllib
+
+        from novamind.core import config
+        from novamind.webui.server import app
+        from fastapi.testclient import TestClient
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            config, "WORKSPACE_DIR", tmp
+        ), mock.patch("novamind.core.doctor.run_doctor") as run:
+            run.return_value.as_dict.return_value = {
+                "ok": True, "counts": {}, "findings": [],
+            }
+            response = TestClient(app).get("/doctor")
+        project = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        version = tomllib.loads(project.read_text(encoding="utf-8"))["project"]["version"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["application"], {
+            "version": version,
+            "build_time": None,
+            "mode": "source",
+            "workspace": str(Path(tmp).resolve()),
+        })
+
     def test_doctor_returns_report(self):
         fake_report = mock.MagicMock()
         fake_report.as_dict.return_value = {
@@ -284,6 +400,8 @@ class TestDoctorEndpoint(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["counts"]["error"], 1)
         self.assertEqual(result["findings"][0]["code"], "doctor_failed")
+        self.assertIn("application", result)
+        self.assertTrue(result["application"]["workspace"])
 
 
 class TestMonitorEndpoints(unittest.TestCase):

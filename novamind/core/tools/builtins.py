@@ -16,9 +16,8 @@ import ast
 import operator
 import os
 import shutil
-import uuid
 from .. import config as _config
-from ..config import MEMORY_DIR, PROFILE_BACKUP_DIR
+from ..config import PROFILE_BACKUP_DIR
 from .. import task_store
 from ..task_store import TASKS_LOCK, load_tasks_unlocked, write_tasks_unlocked
 from .sandbox_tools import (
@@ -147,36 +146,22 @@ def _backup_profile_if_exists() -> None:
 @novamind_tool
 def save_user_profile(new_content: str) -> str:
     """
-    更新用户的全局显性记忆档案。
-    当你发现用户的偏好发生改变，或者有新的重要事实需要记录时：
-    1. 请先调用 read_user_profile 获取当前的完整档案。
-    2. 在你的上下文中，将新信息融入档案，并删去冲突或过时的旧信息。
-    3. 将修改后的一整篇完整 Markdown 文本作为 new_content 参数传入此工具。
-    注意：此操作将完全覆盖旧文件！请确保传入的是完整的最新档案。
+    保存一条个人偏好，不覆盖整个画像。new_content 只包含本次的一条事实。
+    用户明确要求“记住”“以后”时保存为已确认；其他推断仅生成待确认候选。
+    修正已有偏好时优先使用 correct_memory，不要复制整篇历史画像。
     """
-    os.makedirs(MEMORY_DIR, exist_ok=True)
-
-    # 覆写前备份旧画像（如果存在）
-    _backup_profile_if_exists()
-
-    # 原子写入：先写临时文件，再 os.replace 覆盖目标文件
-    tmp_path = _config.PROFILE_PATH + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(new_content)
-    os.replace(tmp_path, _config.PROFILE_PATH)
-
-    # 桥接五层记忆：画像同时写入 procedural 记忆（若记忆 provider 已启用，否则静默降级）
-    try:
-        from ..memory.bootstrap import get_memory_provider
-        from ..memory.persona import save_persona_to_memory
-
-        provider = get_memory_provider()
-        if provider is not None:
-            save_persona_to_memory(provider.manager(), new_content, source="save_user_profile")
-    except Exception:
-        pass
-
-    return "记忆档案已成功覆写更新。新的人设画像已生效。"
+    from ..memory.governance_runtime import get_governance_service
+    from ..personal import memory_allowed, request_context
+    if not memory_allowed(write=True):
+        return "本次对话不记录个人记忆，未保存。"
+    import re
+    source = request_context.get().get("text", "")
+    explicit = bool(re.match(r"\s*(请|帮我|麻烦|你)?\s*(记住|以后|今后|长期偏好|remember\b)", source, re.I))
+    service = get_governance_service()
+    record = service.save_explicit(new_content, confirmed=explicit,
+                                   scope=request_context.get().get("scope", "global"))
+    return ("偏好已保存并生效。" if record.user_confirmed else
+            "已生成记忆候选，可在记忆中心确认后生效。")
 
 
 @novamind_tool
@@ -222,6 +207,8 @@ def schedule_task(
     description: str,
     repeat: str = None,
     repeat_count: int = None,
+    remind_minutes: int = 0,
+    task_date: str = None,
 ) -> str:
     """
     为一个未来的任务设定闹钟或提醒。
@@ -231,6 +218,9 @@ def schedule_task(
     【高级循环功能】：
     - repeat (可选): 设置重复频率。可选值为 "hourly", "daily", "weekly", "monthly"。
     - repeat_count (可选): 结合 repeat 使用，表示一共需要触发几次。
+    - remind_minutes (可选): 提前多少分钟提醒，默认 0，按本机时区保存。
+    - task_date (可选): 若仅明确日期但没有提醒时刻，target_time 传空字符串，
+      task_date 传 YYYY-MM-DD，先保存为待办，并询问具体提醒时间。
 
     【案例教学】：
     1. 用户说："以后每天8点提醒我喝牛奶" -> repeat="daily", repeat_count=None (无限循环)
@@ -243,44 +233,19 @@ def schedule_task(
     2. 【死命令】：在用户明确回复"上午"或"下午"之前，本工具处于【绝对锁定状态】！
     3. 严禁出现"抱歉多问了"、"默认早上"这种妥协行为。
     """
+    from ..schedules import create
+    from ..personal import request_context
     try:
-        target_dt = datetime.strptime(target_time, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return "设定失败：时间格式错误，必须严格遵循 'YYYY-MM-DD HH:MM:SS' 格式。"
-
-    now = datetime.now()
-    if target_dt <= now:
-        return (
-            "设定失败：target_time 必须晚于当前时间。"
-            f" 当前时间：{now.strftime('%Y-%m-%d %H:%M:%S')}，"
-            f" 你传入的是：{target_time}"
-        )
-
-    with TASKS_LOCK:
-        try:
-            tasks = load_tasks_unlocked()
-        except Exception as e:
-            return f"设定失败：读取任务队列异常 {str(e)}"
-
-        new_task = {
-            "id": str(uuid.uuid4())[:8],
-            "target_time": target_time,
-            "description": description,
-            "repeat": repeat,
-            "repeat_count": repeat_count,
-        }
-        tasks.append(new_task)
-
-        try:
-            write_tasks_unlocked(tasks)
-        except Exception as e:
-            return f"设定失败：写入任务队列异常 {str(e)}"
-
-    msg = f" 任务已成功加入队列。首发时间：{target_time} | 任务：{description}"
-    if repeat:
-        msg += f" | 循环模式：{repeat} (共 {repeat_count if repeat_count else '无限'} 次)"
-    return msg
-
+        task = create(target_time, description, repeat, repeat_count, remind_minutes,
+                      source_id=request_context.get().get("turn_id", ""), task_date=task_date)
+        if not target_time:
+            return f"已记录待办 [ID: {task['id']}] {task_date} · {description}；尚未设置定时提醒，请确认提醒时刻。"
+        privacy_note = ("这是你主动创建的日程，会持久保存；私密模式仅限制个人记忆。" if
+                        request_context.get().get("memory_mode") == "private" else "")
+        return (privacy_note + f"已记录 [ID: {task['id']}] {target_time} · {description}"
+                f" · 提前 {remind_minutes} 分钟提醒。")
+    except ValueError as exc:
+        return f"记录失败：{exc}"
 
 @novamind_tool
 def list_scheduled_tasks() -> str:
@@ -303,8 +268,8 @@ def list_scheduled_tasks() -> str:
             res = " 当前待执行任务列表：\n"
             for t in tasks:
                 res += (
-                    f"- [ID: {t['id']}] 时间: {t['target_time']} "
-                    f"| 任务: {t['description']}\n"
+                    f"- [ID: {t['id']}] 时间: {t.get('target_time') or t.get('task_date', '待确认')} "
+                    f"| 任务: {t['description']} | 状态: {t.get('status', 'pending')}\n"
                 )
             return res
         except Exception as e:
@@ -376,6 +341,8 @@ def modify_scheduled_task(
                                 f" 你传入的是：{new_time}"
                             )
                         t["target_time"] = new_time
+                        t["status"] = "pending"
+                        t["kind"] = "reminder"
                     if new_description:
                         t["description"] = new_description
                     found = True

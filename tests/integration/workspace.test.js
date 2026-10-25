@@ -68,6 +68,7 @@ function fixture() {
 test('home reuses original composer; chat repaint restores the same node', () => {
   const ui = fixture();
   assert.equal(ui.footer.parentElement, ui.slot);
+  assert.equal(ui.footer.hidden, false);
   assert.equal(ui.home.attrs['aria-current'], 'page');
   assert.equal(ui.nav[0].attrs['aria-current'], undefined);
   ui.repaint(null);
@@ -80,15 +81,21 @@ test('home reuses original composer; chat repaint restores the same node', () =>
 
 test('opening a tool panel restores composer and preserves original active classes', () => {
   const ui = fixture();
+  ui.ids.input.value = 'unsent draft';
   ui.ids.messages.style.display = 'none';
   ui.nav[0].classList.remove('active');
   ui.nav[1].classList.add('active');
   ui.repaint(ui.slot);
   assert.equal(ui.footer.parentElement, ui.body);
+  assert.equal(ui.footer.hidden, true);
   assert.equal(ui.nav[1].attrs['aria-current'], 'page');
   assert.equal(ui.nav[1].classList.contains('active'), true);
   assert.equal(ui.home.attrs['aria-current'], undefined);
   assert.equal(ui.ids['view-title'].textContent, 'skills');
+  ui.ids.messages.style.display = 'flex';
+  ui.repaint(null);
+  assert.equal(ui.footer.hidden, false);
+  assert.equal(ui.ids.input.value, 'unsent draft');
 });
 
 test('home entry delegates to original new-chat action exactly once', () => {

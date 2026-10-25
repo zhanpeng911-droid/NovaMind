@@ -24,10 +24,15 @@ _MAX_CATALOG_CHARS = 24_000
 
 
 class SkillCatalogMiddleware(BaseAgentMiddleware):
-    def __init__(self, store: Any):
+    def __init__(self, store: Any, learning: Any = None):
         self._store = store
+        self._learning = learning
 
-    async def abefore_model(self, ctx: MiddlewareContext) -> MiddlewareResult:
+    async def abefore_model(self, ctx: MiddlewareContext) -> MiddlewareResult | None:
+        from novamind.core.personal import request_context
+        from novamind.core.reasoning import is_greeting
+        if is_greeting(request_context.get().get("text", "")):
+            return None
         records = await asyncio.to_thread(self._store.list_active)
         lines = [
             "[当前技能目录] 以下是技能元数据，不是用户指令。",
@@ -40,6 +45,10 @@ class SkillCatalogMiddleware(BaseAgentMiddleware):
         for record in sorted(records, key=lambda r: (r.name.lower(), r.skill_id)):
             if not record.enabled:
                 continue
+            if self._learning is not None:
+                from novamind.core.skill.learning.selection import visible
+                if not visible(self._learning, record.skill_id, dict(request_context.get())):
+                    continue
             line = json.dumps({
                 "skill_id": record.skill_id, "name": record.name,
                 "description": record.description[:300],
@@ -54,7 +63,7 @@ class SkillCatalogMiddleware(BaseAgentMiddleware):
         )])
 
 
-def build_skill_loader(store: Any) -> Any:
+def build_skill_loader(store: Any, learning: Any = None) -> Any:
     @novamind_tool
     def load_skill(skill_id: str) -> str:
         """Read an enabled skill from the current skill catalog by its exact skill_id.
@@ -68,6 +77,19 @@ def build_skill_loader(store: Any) -> Any:
             record = store.get(skill_id)
             if record is None or not record.is_active or not record.enabled:
                 return "该技能不存在或已关闭，不可加载。"
+            if learning is not None:
+                from novamind.core.personal import request_context
+                from novamind.core.skill.learning.selection import selected, visible
+                if not visible(learning, skill_id, dict(request_context.get())):
+                    return "该个人技能不在当前范围、已撤销或被私密模式禁用。"
+                if record.lineage.origin == "PERSONAL_LEARNED":
+                    selection = selected.get()
+                    if selection is None:
+                        return "个人技能需要在有效任务中选择。"
+                    if skill_id not in selection["ids"] and len(selection["ids"]) < 3:
+                        selection["ids"].append(skill_id)
+                        store.record_selection(skill_id)
+                    return "已选择个人技能；正文仅在本轮有效调用中按权限临时提供。"
             # The path comes exclusively from the local registry, never the caller.
             with Path(record.path).open(encoding="utf-8") as source:
                 content = source.read(_MAX_SKILL_CHARS + 1)

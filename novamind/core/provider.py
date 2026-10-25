@@ -77,6 +77,10 @@ def get_provider(
         if not final_base_url:
             final_base_url = COMPATIBLE_BASE_URLS.get(provider_name)
 
+        if "deepseek" in model_name.lower() or "api.deepseek.com" in (final_base_url or "").lower():
+            from .llm.deepseek_model import DeepSeekChatModel
+            ChatOpenAI = DeepSeekChatModel
+
         return ChatOpenAI(
             model=model_name,
             temperature=temperature,

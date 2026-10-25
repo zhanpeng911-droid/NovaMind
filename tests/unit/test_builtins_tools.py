@@ -5,7 +5,7 @@
   - calculator/safe_calculate：四则/幂/负数正常；AST 安全（调用、属性、变量名拒绝）；
     除零/语法错误/不安全运算符的友好错误
   - get_system_model_info：env 齐全 / 缺失
-  - save_user_profile：原子覆写 + 时间戳备份 + 超 10 份清理
+  - save_user_profile：单条受治理记忆；legacy 备份 helper 保留单独覆盖
   - 定时任务：格式错误/过去时间拒绝；增删改查正常路径与未找到路径；
     new_time 过去时间拒绝；文件缺失分支
 """
@@ -86,7 +86,7 @@ class TestSystemModelInfo(unittest.TestCase):
         self.assertIn("无法获取", out)
 
 
-class TestSaveUserProfile(unittest.TestCase):
+class TestLegacyProfileBackup(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -94,7 +94,6 @@ class TestSaveUserProfile(unittest.TestCase):
         self.backup = self.memory / "backups"
         self.profile = self.memory / "user_profile.md"
         patchers = [
-            patch.object(builtins, "MEMORY_DIR", str(self.memory)),
             patch("novamind.core.config.PROFILE_PATH", str(self.profile)),
             patch.object(builtins, "PROFILE_BACKUP_DIR", str(self.backup)),
         ]
@@ -105,14 +104,20 @@ class TestSaveUserProfile(unittest.TestCase):
     def _backup_count(self):
         return len(list(self.backup.glob("user_profile.*.md"))) if self.backup.exists() else 0
 
+    def _save_snapshot(self, content):
+        # Legacy backup helper is not the Personal Agent save_user_profile API.
+        builtins._backup_profile_if_exists()
+        self.memory.mkdir(parents=True, exist_ok=True)
+        self.profile.write_text(content, encoding="utf-8")
+
     def test_first_save_creates_file_without_backup(self):
-        save_user_profile.invoke({"new_content": "# v1"})
+        self._save_snapshot("# v1")
         self.assertEqual(self.profile.read_text(encoding="utf-8"), "# v1")
         self.assertEqual(self._backup_count(), 0)
 
     def test_overwrite_creates_timestamped_backup(self):
-        save_user_profile.invoke({"new_content": "# v1"})
-        save_user_profile.invoke({"new_content": "# v2"})
+        self._save_snapshot("# v1")
+        self._save_snapshot("# v2")
         self.assertEqual(self.profile.read_text(encoding="utf-8"), "# v2")
         self.assertEqual(self._backup_count(), 1)
         backup_text = next(self.backup.glob("user_profile.*.md")).read_text(encoding="utf-8")
@@ -132,7 +137,7 @@ class TestSaveUserProfile(unittest.TestCase):
         with patch.object(builtins, "datetime", AdvancingDateTime):
             for i in range(13):
                 AdvancingDateTime.offset_seconds = i * 60
-                save_user_profile.invoke({"new_content": f"# v{i}"})
+                self._save_snapshot(f"# v{i}")
 
         self.assertEqual(self._backup_count(), 10)
         # 最老的被清掉，最新保留
@@ -162,7 +167,8 @@ class TestScheduledTasks(unittest.TestCase):
         return tasks
 
     def test_schedule_bad_format_rejected(self):
-        self.assertIn("时间格式错误", schedule_task.invoke({"target_time": "tomorrow 8am", "description": "hi"}))
+        self.assertIn("记录失败", schedule_task.invoke({"target_time": "tomorrow 8am", "description": "hi"}))
+        self.assertFalse(self.tasks_file.exists())
 
     def test_schedule_past_time_rejected(self):
         past = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
@@ -170,10 +176,14 @@ class TestScheduledTasks(unittest.TestCase):
 
     def test_schedule_success_single_and_repeat_message(self):
         out = schedule_task.invoke({"target_time": self.future, "description": "喝水"})
-        self.assertIn("任务已成功加入队列", out)
+        self.assertIn("已记录", out)
         out2 = schedule_task.invoke({"target_time": self.future, "description": "吃药", "repeat": "daily", "repeat_count": 3})
-        self.assertIn("daily", out2)
-        self.assertIn("3 次", out2)
+        self.assertIn("已记录", out2)
+        import json
+        tasks = json.loads(self.tasks_file.read_text(encoding="utf-8"))
+        repeated = next(task for task in tasks if task["description"] == "吃药")
+        self.assertEqual(repeated["repeat"], "daily")
+        self.assertEqual(repeated["repeat_count"], 3)
 
     def test_list_empty_when_no_file(self):
         self.assertIn("没有任何定时任务", list_scheduled_tasks.invoke({}))
@@ -229,6 +239,8 @@ if __name__ == "__main__":
 class TestBackupMillisecondResolution(unittest.TestCase):
     """P3-2 回归：备份文件名含毫秒，同秒内连续保存生成两个备份。"""
 
+    _save_snapshot = TestLegacyProfileBackup._save_snapshot
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -236,7 +248,6 @@ class TestBackupMillisecondResolution(unittest.TestCase):
         self.backup = self.memory / "backups"
         self.profile = self.memory / "user_profile.md"
         patchers = [
-            patch.object(builtins, "MEMORY_DIR", str(self.memory)),
             patch("novamind.core.config.PROFILE_PATH", str(self.profile)),
             patch.object(builtins, "PROFILE_BACKUP_DIR", str(self.backup)),
         ]
@@ -258,11 +269,39 @@ class TestBackupMillisecondResolution(unittest.TestCase):
                 return datetime(2026, 8, 26, 12, 0, 0, cls.counter * 1000)
 
         with patch.object(builtins, "datetime", Advancing):
-            save_user_profile.invoke({"new_content": "# v1"})  # 首次保存无备份
-            save_user_profile.invoke({"new_content": "# v2"})  # 产生第 1 个备份
-            save_user_profile.invoke({"new_content": "# v3"})  # 产生第 2 个备份
+            self._save_snapshot("# v1")  # 首次保存无备份
+            self._save_snapshot("# v2")  # 产生第 1 个备份
+            self._save_snapshot("# v3")  # 产生第 2 个备份
         backups = list(self.backup.glob("user_profile.*.md"))
         self.assertEqual(len(backups), 2)
         # 同秒内两次保存的备份文件名不同（毫秒位区分）
         names = [b.name for b in backups]
         self.assertEqual(len(set(names)), 2)
+
+
+class TestGovernedProfileTool(unittest.TestCase):
+    def test_single_preference_uses_governance_not_legacy_overwrite(self):
+        from novamind.core.personal import request_context
+        for source, confirmed in [("记住我偏好中文回答", True), ("我这次使用中文", False)]:
+            with self.subTest(confirmed=confirmed), patch(
+                "novamind.core.memory.governance_runtime.get_governance_service"
+            ) as get_service:
+                get_service.return_value.save_explicit.return_value.user_confirmed = confirmed
+                token = request_context.set({"text": source, "scope": "project-test"})
+                try:
+                    result = save_user_profile.invoke({"new_content": "偏好中文回答"})
+                finally:
+                    request_context.reset(token)
+                get_service.return_value.save_explicit.assert_called_once_with(
+                    "偏好中文回答", confirmed=confirmed, scope="project-test")
+                self.assertIn("已保存" if confirmed else "候选", result)
+
+    def test_private_turn_never_writes_memory(self):
+        from novamind.core.personal import request_context
+        with patch("novamind.core.memory.governance_runtime.get_governance_service") as get_service:
+            token = request_context.set({"memory_mode": "private", "text": "记住这句话"})
+            try:
+                self.assertIn("未保存", save_user_profile.invoke({"new_content": "不应落库"}))
+            finally:
+                request_context.reset(token)
+            get_service.assert_not_called()

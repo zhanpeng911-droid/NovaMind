@@ -13,7 +13,11 @@
     document.documentElement.dataset.theme = t;
   })();
 </script>
-<link rel="stylesheet" href="workspace.css?v=20260909-skills">
+<link rel="stylesheet" href="theme.css?v=20261022ui3">
+<link rel="stylesheet" href="workspace.css?v=20261024polish1">
+<link rel="stylesheet" href="controls.css?v=20261024polish1">
+<link rel="stylesheet" href="markdown.css?v=20261023md1">
+<link rel="stylesheet" href="learning.css?v=20261024learn1">
 </head>
 <body>
   <div id="theme-wipe" aria-hidden="true"></div>
@@ -42,6 +46,8 @@
     <button id="sidebar-toggle" class="icon-button" aria-label="收起侧栏" aria-expanded="true" aria-controls="workspace-sidebar" title="展开 / 收起侧栏"><svg class="icon"><use href="#i-panel"/></svg></button>
     <div class="breadcrumb"><span>工作台</span><span class="breadcrumb-divider">/</span><span id="view-title">新会话</span></div>
     <span class="spacer"></span>
+    <button id="open-assistant" class="desktop-entry" title="在助手小窗继续当前会话"><svg class="icon"><use href="#i-panel"/></svg><span>助手小窗</span></button>
+    <details class="nm-disclosure desktop-menu"><summary aria-label="桌面选项" title="桌面选项">⋯</summary><div class="nm-popover nm-menu"><button id="toggle-bubble">显示 / 隐藏悬浮球</button><button id="recover-bubble">找回悬浮球</button><button id="desktop-settings">桌面与悬浮球设置</button></div></details>
     <span class="status idle" id="status" role="status" aria-live="polite"><span class="dot"></span><span id="status-text">STANDBY</span></span>
     <button id="theme-toggle" class="theme-toggle" title="切换白天 / 黑夜模式" aria-label="切换主题">☾</button>
   </header>
@@ -58,6 +64,9 @@
       <button class="home-nav" id="home-nav"><svg class="icon"><use href="#i-home"/></svg><span>首页</span></button>
       <button class="nav-item" data-nav="chat"><svg class="icon"><use href="#i-chat"/></svg><span>聊天</span></button>
       <button class="nav-item" data-nav="skills"><svg class="icon"><use href="#i-spark"/></svg><span>技能</span></button>
+      <button class="nav-item" data-nav="schedule"><svg class="icon"><use href="#i-calendar"/></svg><span>日程</span></button>
+      <button class="nav-item" data-nav="settings"><svg class="icon"><use href="#i-grid"/></svg><span>个人设置</span></button>
+      <button class="nav-item" data-nav="memory"><svg class="icon"><use href="#i-spark"/></svg><span>记忆</span></button>
       <button class="nav-item" data-nav="monitor"><svg class="icon"><use href="#i-audit"/></svg><span>审计</span></button>
       <button class="nav-item" data-nav="doctor"><svg class="icon"><use href="#i-diagnostic"/></svg><span>诊断</span></button>
     </nav>
@@ -72,7 +81,7 @@
   <footer>
     <div class="composer">
       <label class="sr-only" for="input">向 NovaMind 描述任务</label>
-      <textarea id="input" placeholder="描述你的想法，让我们一起实现…" rows="2" aria-describedby="composer-hint"></textarea>
+      <textarea id="input" placeholder="描述你的想法，让我们一起实现…" rows="1" aria-describedby="composer-hint"></textarea>
       <div class="composer-toolbar"><span class="agent-label"><img src="nova-mark.svg" width="18" height="18" alt="">Agent<span class="agent-divider">/</span><span>可审计执行</span></span><span class="composer-spacer"></span>
         <button id="stop" disabled title="停止当前任务"><span class="stop-square" aria-hidden="true"></span><span>停止</span></button>
         <button id="send" aria-label="发送任务" title="发送任务 · Enter"><svg class="icon"><use href="#i-arrow"/></svg></button>
@@ -100,16 +109,50 @@
     </div>
   </template>
 
-<script src="chat_logic.js"></script>
+<script src="vendor/markdown-it-15.0.3.min.js"></script>
+<script src="markdown.js?v=20261023md1"></script>
+<script src="skill_descriptions.js?v=20261023polish1"></script>
+<script src="ui_common.js?v=20261024polish1"></script>
+<script src="learning_ui.js?v=20261024learn1"></script>
+<script src="personal_ui.js?v=20261024learn1"></script>
+<script src="chat_logic.js?v=20261022ui3"></script>
+<script src="controls.js?v=20261024polish1"></script>
 <script>
 (function () {
   const messagesEl = document.getElementById('messages');
   const panelEl = document.getElementById('panel');
+  const composerFooter = document.querySelector('footer');
   const sessionsEl = document.getElementById('sessions');
   const input = document.getElementById('input');
   const sendBtn = document.getElementById('send');
   const statusEl = document.getElementById('status');
   const statusText = document.getElementById('status-text');
+  const imageComposer = new NovaMindUI.Images(input, document.querySelector('.composer'));
+  document.querySelector('.composer-toolbar').prepend(imageComposer.button);
+  const options = document.createElement('details');
+  options.className = 'nm-disclosure open-up composer-options';
+  options.innerHTML = '<summary>'+NovaMindUI.icon('settings')+'<span id="conversation-options-label">对话选项</span></summary><div class="nm-popover"><h4>当前对话</h4><label>记忆模式<select id="memory-mode" aria-label="记忆模式"><option value="normal">个人记忆</option><option value="no_record">本次不记录</option><option value="private">私密：不读不写</option></select></label><label>项目范围<input id="memory-scope" aria-label="当前项目范围" placeholder="范围：global" value="global"></label><label>表达风格<select id="chat-style" aria-label="本会话表达风格"><option value="">默认表达</option><option value="concise">简洁</option><option value="detailed">详细</option><option value="warm">温和</option><option value="formal">正式</option></select></label></div>';
+  document.querySelector('.composer-toolbar').insertBefore(options, document.querySelector('.agent-label'));
+  const reasoningHost=document.createElement('span');reasoningHost.className='reasoning-picker';
+  document.querySelector('.composer-toolbar').insertBefore(reasoningHost,document.getElementById('stop'));
+  const reasoningSelect=NovaMindUI.reasoningPicker(reasoningHost);
+  function syncConversationBadge(){
+    const value=document.getElementById('memory-mode').value;
+    options.classList.toggle('is-private', value!=='normal');
+    document.getElementById('conversation-options-label').textContent=value==='private'?'私密对话':value==='no_record'?'本次不记录':'对话选项';
+  }
+  document.getElementById('memory-mode').addEventListener('change',syncConversationBadge);
+  async function desktopCommand(method, ...args) {
+    try {
+      if(!window.pywebview?.api?.[method]) throw new Error('请在 NovaMind 桌面程序中使用此功能');
+      await window.pywebview.api[method](...args);
+    } catch(error) { NovaMindControls.notify(error.message); }
+    document.querySelector('.desktop-menu').open=false;
+  }
+  document.getElementById('open-assistant').onclick=()=>desktopCommand('show_panel',currentSession()?.threadId||null);
+  document.getElementById('toggle-bubble').onclick=()=>desktopCommand('toggle_bubble');
+  document.getElementById('recover-bubble').onclick=()=>desktopCommand('reset_bubble');
+  document.getElementById('desktop-settings').onclick=()=>{document.querySelector('.desktop-menu').open=false;document.querySelector('[data-nav="settings"]').click();};
 
   // ── 白天/黑夜模式切换（翻页式覆盖：新主题色从左侧斜向滑入，慢慢盖住旧界面）──
   const themeBtn = document.getElementById('theme-toggle');
@@ -122,6 +165,7 @@
     themeBtn.title = light ? '切换黑夜模式' : '切换白天模式';
   }
   applyThemeIcon();
+  window.addEventListener('novamind-settings', applyThemeIcon);
 
   themeBtn.addEventListener('click', () => {
     if (themeSwitching) return;
@@ -225,50 +269,24 @@
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
   function renderMarkdown(src) {
-    const lines = src.split('\n');
-    const out = [];
-    let inCode = false, codeBuf = [];
-    let inList = false;
-    function flushList() { if (inList) { out.push('</ul>'); inList = false; } }
-    function inline(s) {
-      return escapeHtml(s)
-        .replace(/`([^`]+)`/g, '<code>$1</code>')
-        .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
-    }
-    for (const raw of lines) {
-      if (raw.trim().startsWith('```')) {
-        if (inCode) { out.push('<pre><code>' + escapeHtml(codeBuf.join('\n')) + '</code></pre>'); codeBuf = []; inCode = false; }
-        else { flushList(); inCode = true; }
-        continue;
-      }
-      if (inCode) { codeBuf.push(raw); continue; }
-      const t = raw.trim();
-      if (!t) { flushList(); out.push(''); continue; }
-      if (/^[-*]\s+/.test(t)) {
-        if (!inList) { out.push('<ul>'); inList = true; }
-        out.push('<li>' + inline(t.replace(/^[-*]\s+/, '')) + '</li>');
-        continue;
-      }
-      flushList();
-      if (/^#{1,4}\s+/.test(t)) { out.push('<h3>' + inline(t.replace(/^#{1,4}\s+/, '')) + '</h3>'); continue; }
-      out.push(inline(raw));
-    }
-    flushList();
-    if (inCode) out.push('<pre><code>' + escapeHtml(codeBuf.join('\n')) + '</code></pre>');
-    return out.join('\n');
+    return NovaMindMarkdown.render(src);
   }
 
   function switchView(view) {
     currentView = view;
     const isChat = view === 'chat';
+    composerFooter.hidden = !isChat;
+    panelEl.dataset.view = view;
     messagesEl.style.display = isChat ? 'flex' : 'none';
-    panelEl.style.display = isChat ? 'none' : 'block';
+    panelEl.style.display = isChat ? 'none' : view === 'monitor' ? 'flex' : 'block';
     document.querySelectorAll('.nav-item').forEach(n => {
       n.classList.toggle('active', n.dataset.nav === view);
     });
     if (view === 'monitor') loadMonitor();
+    else if (view === 'settings' || view === 'schedule') window.NovaMindPersonal.render(view);
     else if (view === 'doctor') loadDoctor();
     else if (view === 'skills') loadSkills();
+    else if (view === 'memory') loadMemories();
     else { refreshRunUI(); input.focus(); }
   }
 
@@ -287,12 +305,17 @@
       pageState.sessions.cursor = (data.pagination && data.pagination.next_cursor) || null;
       pageState.sessions.hasMore = !!(data.pagination && data.pagination.has_more);
       if (reset) {
-        // 保留草稿（尚未发送第一条消息的会话只存在于前端）
-        const drafts = sessions.filter(x => x.isDraft);
+        // Drafts and in-flight mirrored turns may not be persisted yet.
+        const drafts = sessions.filter(x => x.isDraft || sessionStates.get(x.id)?.running);
         const known = new Set(items.map(x => x.id));
         sessions = drafts.filter(x => !known.has(x.id)).concat(items);
         const last = localStorage.getItem('novamind_last_thread');
-        if (!sessionsLoaded && last && sessions.some(s => s.id === last)) await switchTo(last);
+        const quickThread = new URLSearchParams(location.search).get('thread');
+        if (!sessionsLoaded && quickThread) {
+          // A3：Quick Panel 升级到完整 Agent 时带 thread 参数，直接续接同一会话
+          await switchTo(quickThread);
+          history.replaceState({}, '', location.pathname);
+        } else if (!sessionsLoaded && last && sessions.some(s => s.id === last)) await switchTo(last);
         else if (!sessionsLoaded) newChat();
         sessionsLoaded = true;
       } else {
@@ -308,18 +331,22 @@
 
   function currentSession() { return sessions.find(s => s.id === currentId); }
   function newChat() {
+    stashComposer();
     switchView('chat');
     const draft = { id: 'draft_' + Date.now(), threadId: null, title: '新会话', isDraft: true };
     sessions.unshift(draft);
     currentId = draft.id;
+    restoreComposer();
     renderSessions();
     renderMessages();
     refreshRunUI();
     input.focus();
   }
   async function switchTo(id) {
+    stashComposer();
     switchView('chat');
     currentId = id;
+    restoreComposer();
     const s = currentSession();
     if (!s) return;
     const st = sessionState(id);
@@ -359,6 +386,21 @@
       if (sessions.length) await switchTo(sessions[0].id);
       else newChat();
     } else renderSessions();
+  }
+
+  function stashComposer() {
+    if (!currentId) return;
+    sessionState(currentId).draft = {text:input.value, images:imageComposer.items,
+      mode:document.getElementById('memory-mode').value, scope:document.getElementById('memory-scope').value,
+      style:document.getElementById('chat-style').value};
+  }
+  function restoreComposer() {
+    const draft=sessionState(currentId).draft || {};
+    input.value=draft.text || '';imageComposer.restore(draft.images || []);
+    document.getElementById('memory-mode').value=draft.mode || 'normal';
+    document.getElementById('memory-scope').value=draft.scope || 'global';
+    document.getElementById('chat-style').value=draft.style || '';
+    syncConversationBadge();
   }
   function renderSessions() {
     sessionsEl.innerHTML = '';
@@ -447,6 +489,7 @@
     st.messages.forEach(m => {
       const el = document.createElement('div');
       el.className = 'msg ' + (m.role === 'user' ? 'user' : 'ai');
+      NovaMindUI.renderImages(el, m.images);
       if (m.role === 'ai' && m.tools && m.tools.length) {
         m.tools.forEach(t => {
           const tag = document.createElement('span');
@@ -456,8 +499,15 @@
         });
       }
       const body = document.createElement('div');
+      body.className = 'markdown-body';
       body.innerHTML = renderMarkdown(m.content || '');
       el.appendChild(body);
+      if(m.schedules?.length){const cards=document.createElement('div');m.schedules.forEach(task=>{const card=document.createElement('div');card.className='schedule-card';const title=document.createElement('strong');title.textContent=task.description;const time=document.createElement('div');time.className='schedule-meta';time.textContent=(task.target_time||task.task_date)+(task.kind==='todo'?' · 待办，待确认提醒时间':' · 提前 '+(task.remind_minutes||0)+' 分钟提醒')+' · '+(task.repeat||'单次')+' · '+(task.status||'pending');const open=document.createElement('button');open.textContent='查看 / 修改日程';open.onclick=()=>document.querySelector('[data-nav="schedule"]').click();card.append(title,time,open);cards.append(card);});el.append(cards);}
+      if (m.memories?.length) {
+        const details=document.createElement('details');details.className='memory-references';
+        const summary=document.createElement('summary');summary.textContent='本轮使用的记忆 · '+m.memories.length;details.append(summary);
+        m.memories.forEach(memory=>{const p=document.createElement('p');p.textContent=memory.content||memory.id;details.append(p);});el.append(details);
+      }
       if (m.note) {
         // 终态提示（已停止 / 运行错误）随消息状态持久化，重绘不丢
         const note = document.createElement('div');
@@ -465,6 +515,7 @@
         note.textContent = m.note;
         el.appendChild(note);
       }
+      if(m.live&&st.running&&!m.content){const thinking=document.createElement('div');thinking.className='thinking-line';thinking.textContent=m.tools?.length?'正在使用工具…':'正在处理';el.append(thinking);}
       if (m.role === 'ai') addCopyBtn(el, () => m.content || '');
       messagesEl.appendChild(el);
     });
@@ -506,11 +557,14 @@
   function stopCurrent() {
     const st = currentId ? sessionStates.get(currentId) : null;
     if (st && st.running && st.abortController) st.abortController.abort();
+    else if(st?.remoteTurn)fetchJson('/workspace/turns/'+encodeURIComponent(st.remoteTurn)+'/cancel',{method:'POST'}).catch(error=>flashStatus(error.message));
   }
 
   async function send() {
+    const learningStarted = Date.now();
     const text = input.value.trim();
-    if (!text || !currentId) return;
+    if ((!text && !imageComposer.items.length) || !currentId || imageComposer.pending) return;
+    if(imageComposer.items.length>3){flashStatus('草稿图片均已保留，请移除至最多 3 张后发送');return;}
     const s = currentSession();
     if (!s) return;
     const st = sessionState(currentId);
@@ -520,11 +574,17 @@
     const token = ++requestCounter;     // 请求 token：晚到的旧帧按 token 丢弃
     st.requestToken = token;
     st.running = true;
+    st.lastMemories = [];
+    st.lastSchedules = [];
     st.abortController = new AbortController();
 
     input.value = '';
     input.style.height = 'auto';
-    st.messages.push({ role: 'user', content: text, tools: [] });
+    const images = imageComposer.clear();
+    const requestOptions = {memory_mode:document.getElementById('memory-mode').value,
+      scope:document.getElementById('memory-scope').value || 'global',style:document.getElementById('chat-style').value,
+      reasoning:reasoningSelect.value,client_id:NovaMindUI.clientId,source:'workspace'};
+    st.messages.push({ role: 'user', content: text, tools: [], images });
 
     const isViewing = () => sessionId === currentId && currentView === 'chat';
     if (isViewing()) { renderMessages(); refreshRunUI(); }
@@ -533,6 +593,7 @@
     const aiEl = document.createElement('div');
     aiEl.className = 'msg ai';
     const aiBody = document.createElement('div');
+    aiBody.className = 'markdown-body';
     aiEl.appendChild(aiBody);
     const cursorEl = document.createElement('span');
     cursorEl.className = 'cursor';
@@ -555,7 +616,7 @@
       const resp = await fetch('/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, thread_id: s.threadId }),
+        body: JSON.stringify({ message: text, images, thread_id: s.threadId, ...requestOptions }),
         signal: st.abortController.signal,
       });
       if (!resp.ok || !resp.body) {
@@ -584,6 +645,8 @@
           try { data = JSON.parse(line.slice(6)); } catch (e3) { continue; }
           // 晚到帧：token 不匹配则只丢弃，不写进当前切换后的会话
           if (st.requestToken !== token) continue;
+          if (data.type === 'memories') { st.lastMemories = data.items; continue; }
+          if (data.type === 'schedules') { st.lastSchedules = data.items; continue; }
           if (data.type === 'thread') {
             if (s.isDraft) {
               s.threadId = data.thread_id;
@@ -630,6 +693,11 @@
       }
     } catch (err) {
       aborted = err.name === 'AbortError';
+      const visible=sessionId===currentId,draft=st.draft||{};
+      const newer=visible?input.value:(draft.text||''),retained=visible?imageComposer.items:(draft.images||[]);
+      for(const id of [...images].reverse())if(!retained.includes(id))retained.unshift(id);
+      draft.text=newer&&newer!==text?text+'\n\n'+newer:text;draft.images=retained;st.draft=draft;
+      if(visible){input.value=draft.text;imageComposer.restore(retained);}
       NovaMindChatLogic.setTerminalError(turn, aborted, err.message);
       const seg = document.createElement('span');
       seg.textContent = turn.errorText;
@@ -641,10 +709,14 @@
       st.abortController = null;
       const finalMsg = NovaMindChatLogic.buildFinalMessage(turn);
       if (finalMsg) {
+        finalMsg.memories = st.lastMemories || [];
+        finalMsg.schedules = st.lastSchedules || [];
         // 终态（含停止/错误提示）写入会话状态：切换/重绘后仍然可见
         st.messages.push(finalMsg);
       }
-      if (sessionId === currentId) { renderMessages(); refreshRunUI(); }
+      if (sessionId === currentId) { renderMessages(); refreshRunUI();
+        if(requestOptions.memory_mode==='normal'&&!turn.errorText){const last=[...messagesEl.querySelectorAll('.msg.ai')].pop();window.NovaMindLearning?.usage(sessionId,last,learningStarted);}
+      }
       renderSessions();
       if (!s.isDraft) loadSessions(true);  // 刷新侧边栏标题（不重新选择会话）
       input.focus();
@@ -665,6 +737,30 @@
     const findings = data.findings || [];
     let html = '<div class="panel-header"><span class="bar">❯</span> 架构诊断</div>';
     html += '<div class="panel-sub">SYSTEM HEALTH CHECK · ' + findings.length + ' FINDINGS</div>';
+    const application = data.application || {};
+    const packaged = application.mode === 'packaged';
+    const source = application.mode === 'source';
+    const builtAt = packaged && typeof application.build_time === 'string'
+      ? new Date(application.build_time) : null;
+    const validBuildTime = builtAt && Number.isFinite(builtAt.getTime());
+    const appVersion = application.version && application.version !== 'unknown'
+      ? String(application.version) : '未记录';
+    html += '<section class="doctor-application" aria-label="应用信息">';
+    html += '<div class="doctor-app-heading"><h2>应用信息</h2><span>'
+      + (packaged ? '桌面打包版' : source ? '源码运行' : '运行信息未记录') + '</span></div><dl>';
+    html += '<div><dt>版本</dt><dd>' + escapeHtml(appVersion) + '</dd></div>';
+    html += '<div><dt>构建时间</dt><dd>';
+    if (validBuildTime) {
+      const displayTime = new Intl.DateTimeFormat('zh-CN', {
+        year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit',
+        minute: '2-digit', second: '2-digit', hour12: false, timeZoneName: 'short',
+      }).format(builtAt);
+      html += '<time datetime="' + builtAt.toISOString() + '">' + escapeHtml(displayTime) + '</time>';
+    } else {
+      html += source ? '未打包' : '未记录';
+    }
+    html += '</dd></div><div class="doctor-workspace"><dt>当前工作区</dt><dd><code>'
+      + escapeHtml(String(application.workspace || '未记录')) + '</code></dd></div></dl></section>';
     html += '<div class="doctor-summary">';
     html += '<span class="badge error">ERR ' + (counts.error || 0) + '</span> ';
     html += '<span class="badge warn">WARN ' + (counts.warning || 0) + '</span> ';
@@ -773,6 +869,8 @@
       ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
   async function renderMonitor(resetEvents = true) {
+    const sessionScroll = panelEl.querySelector('.monitor-sessions')?.scrollTop || 0;
+    const eventScroll = resetEvents ? 0 : panelEl.querySelector('.monitor-events')?.scrollTop || 0;
     let msHtml = monitorSessions.map(s =>
       '<div class="ms-item' + (s.thread_id === monitorActiveId ? ' active' : '') + '" data-tid="' + escapeHtml(s.thread_id) + '">' +
       escapeHtml(s.thread_id) + '<div class="ms-size">' + (s.size_bytes / 1024).toFixed(1) + ' KB</div></div>'
@@ -830,8 +928,11 @@
     panelEl.innerHTML = '<div class="panel-header"><span class="bar">❯</span> 监控面板 <span class="count">' + monitorSessions.length + ' LOGS</span></div>' +
       '<div class="panel-sub">AUDIT EVENT STREAM · LIVE</div>' +
       '<div class="monitor-layout">' +
-      '<div class="monitor-sessions"><div class="ms-title">Sessions</div>' + msHtml + '</div>' +
-      '<div class="monitor-events">' + evHtml + '</div></div>';
+      '<div class="monitor-sessions" tabindex="0" role="region" aria-label="审计会话列表"><div class="ms-title">Sessions</div>' + msHtml + '</div>' +
+      '<div class="monitor-events" tabindex="0" role="region" aria-label="当前会话审计事件">' + evHtml + '</div></div>';
+
+    panelEl.querySelector('.monitor-sessions').scrollTop = sessionScroll;
+    panelEl.querySelector('.monitor-events').scrollTop = eventScroll;
 
     panelEl.querySelectorAll('.ms-item').forEach(item => {
       item.addEventListener('click', async () => {
@@ -923,10 +1024,10 @@
       skills.forEach(s => {
         html += '<div class="skill-card">';
         html += '<div class="skill-name">' + escapeHtml(s.name) + '</div>';
-        html += '<div class="skill-desc">' + escapeHtml(s.description || '（无描述）') + '</div>';
+        html += '<div class="skill-desc">' + escapeHtml(NovaMindSkillDescriptions.describe(s.description)) + '</div>';
         html += '<div class="skill-meta">';
-        html += '<span>SEL ' + s.selections + '</span><span>APP ' + s.applied + '</span><span>DONE ' + s.completions + '</span>';
-        if (s.selections > 0) html += '<span class="rate">EFF ' + (s.effective_rate * 100).toFixed(0) + '%</span>';
+        html += '<span>选择 ' + s.selections + '</span><span>应用 ' + s.applied + '</span><span>完成 ' + s.completions + '</span>';
+        if (s.selections > 0) html += '<span class="rate">有效率 ' + (s.effective_rate * 100).toFixed(0) + '%</span>';
         html += '</div><div class="skill-controls"><span class="skill-state">'
           + (skillSaves.has(s.skill_id) ? '正在保存…' : s.enabled ? '已启用' : '已关闭') + '</span>';
         html += '<button type="button" class="skill-toggle" role="switch" aria-checked="'
@@ -946,6 +1047,7 @@
     });
     const more = panelEl.querySelector('#skills-load-more');
     if (more) more.addEventListener('click', () => loadSkills(false));
+    window.NovaMindLearning?.mountSkills(panelEl);
   }
 
   const stopBtn = document.getElementById('stop');
@@ -953,7 +1055,7 @@
   document.getElementById('new-chat').addEventListener('click', newChat);
   sendBtn.addEventListener('click', send);
   input.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
   });
   input.addEventListener('input', function () {
     input.style.height = 'auto';
@@ -963,10 +1065,301 @@
     item.addEventListener('click', () => switchView(item.dataset.nav));
   });
 
-  loadSessions();
+  // ── 记忆中心（B1/B2）─────────────────────────────────────────────────
+  let memoryDocumentScope='global';
+  let memoryDocumentRequest=0;
+  async function mountMemoryDocument(){
+    const editor=document.getElementById('memory-document-text'),save=document.getElementById('memory-document-save');
+    if(!editor)return;
+    const state=document.getElementById('memory-document-state'),scopeInput=document.getElementById('memory-document-scope');
+    const compare=document.getElementById('memory-document-compare'),server=document.getElementById('memory-document-server');
+    const scope=memoryDocumentScope,request=++memoryDocumentRequest;
+    const current=()=>editor.isConnected&&request===memoryDocumentRequest&&scope===memoryDocumentScope;
+    const dirty=()=>editor.dataset.loaded==='true'&&editor.value!==editor.dataset.original;
+    const discard=async()=>!dirty()||!!await NovaMindUI.dialogForm({title:'放弃尚未保存的记忆编辑？',
+      description:'重新加载或切换范围会替换当前草稿。请先复制需要保留的内容。',submit:'继续加载'});
+    save.disabled=true;editor.disabled=true;compare.hidden=true;
+    document.getElementById('memory-document-reload').onclick=async()=>{if(await discard())await mountMemoryDocument();};
+    scopeInput.onchange=async event=>{
+      const next=event.target.value.trim()||'global';
+      if(next===scope)return;
+      if(!await discard()){event.target.value=scope;return;}
+      memoryDocumentScope=next;await mountMemoryDocument();
+    };
+    save.onclick=async()=>{
+      if(!current()||save.disabled)return;
+      if(editor.dataset.conflict==='true'&&!await NovaMindUI.dialogForm({title:'以当前文本保存记忆？',
+        description:'请确认已对照并合并双方内容。保存后，未出现在文本中的当前范围条目将被停用。',submit:'确认合并并保存'}))return;
+      if(!current())return;
+      const payload={content:editor.value,revision:editor.dataset.revision,scope};
+      save.disabled=true;editor.disabled=true;scopeInput.disabled=true;state.textContent='正在保存…';
+      try{
+        await fetchJson('/personal/memory-document',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+        if(current())await loadMemories();
+      }catch(error){
+        if(current()){state.textContent=error.message+'；草稿已保留。若版本已更新，请复制草稿后重新加载并合并。';save.disabled=false;}
+      }finally{if(current())editor.disabled=false;if(scopeInput.isConnected)scopeInput.disabled=false;}
+    };
+    try{
+      const doc=await fetchJson('/personal/memory-document?scope='+encodeURIComponent(scope));
+      if(!current())return;
+      editor.value=doc.content;editor.dataset.original=doc.content;editor.dataset.loaded='true';
+      editor.dataset.revision=doc.revision;editor.dataset.conflict=String(!!doc.conflict);
+      editor.disabled=false;save.disabled=false;server.readOnly=true;server.value=doc.server_content||'';
+      compare.hidden=!doc.conflict;document.getElementById('memory-document-path').textContent=doc.path;
+      state.textContent=doc.conflict?'双方均有修改：上方为可编辑的文件内容，展开下方已保存内容进行合并。保存不会自动合并。'
+        :'已确认内容会在发送前注入上下文，受当前范围、隐私模式和记忆预算约束。';
+    }catch(error){if(current())state.textContent=error.message;}
+  }
+  let memoryCache = [];
+  let memoryRequest = 0, memoryOffset = 0;
+  let memoryFilters = {state:'',category:''};
+  const memoryStateLabels = {
+    proposed: '候选', active: '生效', disabled: '已禁用',
+    rejected: '已拒绝', deleted: '已删除',
+  };
+  const memoryCategoryLabels = {
+    preference: '偏好', project_context: '项目上下文',
+    experience: '经验', active_task: '临时任务', general: '通用', legacy: '历史',
+  };
+
+  async function loadMemories(more = false) {
+    more = more === true;
+    const token=++memoryRequest;
+    const state = document.getElementById('memory-state-filter')?.value ?? memoryFilters.state;
+    const category = document.getElementById('memory-category-filter')?.value ?? memoryFilters.category;
+    memoryFilters={state,category};
+    if(!more)memoryOffset=0;
+    panelEl.innerHTML = '<div class="panel-loading">正在加载记忆中心...</div>';
+    try {
+      let url = '/memories?limit=100&offset='+memoryOffset;
+      if (state !== 'deleted') url += '&exclude_deleted=true';
+      if (state) url += '&state=' + encodeURIComponent(state);
+      if (category) url += '&category=' + encodeURIComponent(category);
+      const [data, settings] = await Promise.all([
+        fetchJson(url), fetchJson('/settings/memory'),
+      ]);
+      if(token!==memoryRequest||currentView!=='memory')return;
+      memoryCache = more ? memoryCache.concat(data.memories||[]) : data.memories || [];
+      memoryOffset += (data.memories||[]).length;
+      renderMemories({...data,memories:memoryCache}, settings);
+    } catch (e) {
+      if(token!==memoryRequest||currentView!=='memory')return;
+      panelEl.innerHTML = '<div class="panel-error">加载记忆失败：' + escapeHtml(e.message) + '</div>';
+    }
+  }
+
+  function renderMemories(data, settings) {
+    const attr = value => escapeHtml(value).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const items = data.memories || [];
+    let html = '<div class="panel-header"><span class="bar">❯</span> 记忆中心 <span class="count">'
+      + (data.count || 0) + ' MEMORIES</span></div>';
+    html += '<div class="panel-sub">五层记忆保留：记忆结构 · 衰减遗忘 · 检索 · 对话召回 · 后台沉淀。自动候选须确认后参与召回。已删除的记忆默认隐藏；后台仅保留防止再次写入的删除标记。</div>';
+    html += '<section class="memory-document"><div class="memory-document-heading"><div><span class="control-label">PERSONAL CONTEXT</span><h3>MEMORY.md</h3></div><label>范围 <input id="memory-document-scope" aria-label="记忆文本范围" maxlength="120" value="'+attr(memoryDocumentScope)+'"></label></div><p>把重要事实整理成一份可编辑的文本。每条用空行分隔；移除的条目会停用，候选不会自动混入。</p><textarea id="memory-document-text" aria-label="个人记忆文本" spellcheck="false" disabled placeholder="正在加载记忆文本…"></textarea><details id="memory-document-compare" hidden><summary>当前已保存内容 · 展开对照</summary><p>此处为治理库中当前有效的文本，只读供比较。请在上方手工合并，不会自动覆盖草稿。</p><textarea id="memory-document-server" aria-label="当前已保存的记忆文本（只读）" readonly spellcheck="false"></textarea></details><div class="memory-document-footer"><span id="memory-document-state" role="status"></span><button id="memory-document-reload">重新加载</button><button id="memory-document-save" class="primary" disabled>保存记忆</button></div><small id="memory-document-path"></small></section>';
+    html += '<div class="personal-actions"><button id="memory-add">新增记忆</button><button id="memory-export">导出有效与候选记忆</button></div>';
+    html += '<div class="memory-toolbar">'
+      + '<select id="memory-state-filter" aria-label="按状态筛选">'
+      + '<option value="">当前记忆（不含已删除）</option>'
+      + Object.entries(memoryStateLabels).map(([v, l]) =>
+          '<option value="' + v + '">' + l + '</option>').join('')
+      + '</select>'
+      + '<select id="memory-category-filter" aria-label="按分类筛选">'
+      + '<option value="">全部分类</option>'
+      + Object.entries(memoryCategoryLabels).map(([v, l]) =>
+          '<option value="' + v + '">' + l + '</option>').join('')
+      + '</select>'
+      + '<button type="button" id="memory-refresh">刷新</button>'
+      + '</div>';
+    html += '<div class="memory-settings">'
+      + '<label><input type="checkbox" id="memory-recall"'
+      + (settings.recall_enabled ? ' checked' : '') + '> 召回</label>'
+      + '<label><input type="checkbox" id="memory-auto-extract"'
+      + (settings.auto_extract ? ' checked' : '') + '> 自动抽取候选</label>'
+      + '<label>预算 <input type="number" id="memory-budget" min="100" max="20000" step="100" value="'
+      + Number(settings.token_budget || 2000) + '"></label>'
+      + '</div>';
+    if (!items.length) {
+      html += '<div class="panel-empty">暂无记忆。可直接说“记住……”保存重要事实；后台按批次提炼偏好、项目上下文与经验，候选确认后才跨会话使用。</div>';
+    } else {
+      html += '<div class="memory-list">';
+      items.forEach(m => {
+        const state = m.state || 'active';
+        const category = m.category || 'general';
+        html += '<div class="memory-card" data-memory-id="' + attr(m.memory_id)
+          + '" data-revision="' + Number(m.revision) + '" data-state="' + attr(state) + '">';
+        html += '<div class="memory-content">' + escapeHtml(m.content || (state === 'deleted' ? '此记忆已删除，不再参与回答。' : '（正文缺失）')) + '</div>';
+        html += '<div class="memory-meta">'
+          + '<span class="memory-state state-' + attr(state) + '">'
+          + (memoryStateLabels[state] || state) + '</span>'
+          + '<span>' + (memoryCategoryLabels[category] || category) + '</span>'
+          + (m.source_thread_id ? '<span>来源 ' + escapeHtml(m.source_thread_id) + '</span>' : '')
+          + '<span>rev ' + Number(m.revision) + '</span>'
+          + (m.user_confirmed ? '<span>已确认</span>' : '<span>未确认</span>')
+          + '</div>';
+        html += '<details class="nm-disclosure memory-actions"><summary>管理记忆 ···</summary><div class="nm-popover nm-menu">';
+        if (state === 'proposed') {
+          html += '<button type="button" data-memory-action="confirm">确认</button>'
+            + '<button type="button" data-memory-action="reject">拒绝</button>';
+        } else if (state === 'active') {
+          html += '<button type="button" data-memory-action="edit">编辑</button>'
+            + '<button type="button" data-memory-action="disable">禁用</button>'
+            + '<button type="button" data-memory-action="delete">删除</button>';
+        } else if (state === 'disabled') {
+          html += '<button type="button" data-memory-action="enable">启用</button>'
+            + '<button type="button" data-memory-action="delete">删除</button>';
+        } else {
+          html += '<button type="button" data-memory-action="detail">详情</button>';
+        }
+        if (state !== 'deleted' || m.content) html += '<button type="button" data-memory-action="purge">清除正文</button>';
+        html += '</div></details>';
+        html += '<div class="memory-detail" hidden>'
+          + '<textarea class="memory-edit-text" aria-label="记忆正文"></textarea>'
+          + '<div class="memory-detail-row">'
+          + '<select class="memory-edit-category">'
+          + Object.entries(memoryCategoryLabels).map(([v, l]) =>
+              '<option value="' + v + '"' + (v === category ? ' selected' : '') + '>' + l + '</option>').join('')
+          + '</select>'
+          + '<input class="memory-edit-scope" placeholder="scope（global / project-x）" value="'
+          + attr(m.scope || 'global') + '">'
+          + '</div>'
+          + '<div class="memory-detail-actions">'
+          + '<button type="button" data-memory-action="save">保存</button>'
+          + '<button type="button" data-memory-action="cancel">取消</button>'
+          + '</div>'
+          + '<div class="memory-revisions"></div>'
+          + '</div>';
+        html += '</div>';
+      });
+      html += '</div>';
+    }
+    if(data.pagination?.has_more)html+='<button id="memory-more" class="load-more">加载更多</button>';
+    panelEl.innerHTML = html;
+    mountMemoryDocument();
+    document.getElementById('memory-state-filter').value=memoryFilters.state;
+    document.getElementById('memory-category-filter').value=memoryFilters.category;
+    document.getElementById('memory-more')?.addEventListener('click',()=>loadMemories(true));
+    document.getElementById('memory-add').onclick=async()=>{const result=await NovaMindUI.dialogForm({title:'记住一件重要的事',description:'只保存你希望今后回答时使用的信息。',fields:[{name:'content',label:'记忆内容',type:'textarea',required:true,maxLength:4000}],onSubmit:values=>fetchJson('/personal/memories',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)})});if(result)loadMemories();};
+    document.getElementById('memory-export').onclick=async()=>{try{const data=await fetchJson('/personal/memories/export');const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='novamind-memories.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}catch(e){NovaMindControls.notify(e.message);}};
+    document.getElementById('memory-refresh').addEventListener('click', loadMemories);
+    ['memory-state-filter', 'memory-category-filter'].forEach(id => {
+      document.getElementById(id).addEventListener('change', loadMemories);
+    });
+    ['memory-recall', 'memory-auto-extract'].forEach(id => {
+      document.getElementById(id).addEventListener('change', saveMemorySettings);
+    });
+    document.getElementById('memory-budget').addEventListener('change', saveMemorySettings);
+    panelEl.querySelectorAll('[data-memory-action]').forEach(button => {
+      button.addEventListener('click', () => handleMemoryAction(button));
+    });
+  }
+
+  async function saveMemorySettings() {
+    try {
+      const payload = {
+        recall_enabled: document.getElementById('memory-recall').checked,
+        auto_extract: document.getElementById('memory-auto-extract').checked,
+        token_budget: Number(document.getElementById('memory-budget').value || 2000),
+      };
+      await fetchJson('/settings/memory', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch (e) {
+      NovaMindControls.notify('保存记忆设置失败：' + e.message);
+    }
+  }
+
+  async function handleMemoryAction(button) {
+    const card = button.closest('.memory-card');
+    const memoryId = card.dataset.memoryId;
+    const revision = Number(card.dataset.revision);
+    const action = button.dataset.memoryAction;
+    try {
+      if (action === 'edit' || action === 'detail') {
+        const detail = await fetchJson('/memories/' + encodeURIComponent(memoryId));
+        const box = card.querySelector('.memory-detail');
+        card.querySelector('.memory-edit-text').value = detail.content || '';
+        card.querySelector('.memory-revisions').innerHTML = (detail.revisions || [])
+          .slice(-5).map(r => '<div>rev ' + r.revision + ' · '
+            + escapeHtml(r.to_state) + (r.reason ? ' · ' + escapeHtml(r.reason) : '')
+            + '</div>').join('');
+        box.hidden = false;
+        return;
+      }
+      if (action === 'cancel') {
+        card.querySelector('.memory-detail').hidden = true;
+        return;
+      }
+      if (action === 'save') {
+        const content = card.querySelector('.memory-edit-text').value;
+        const category = card.querySelector('.memory-edit-category').value;
+        const scope = card.querySelector('.memory-edit-scope').value.trim() || 'global';
+        await fetchJson('/memories/' + encodeURIComponent(memoryId), {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content, category, scope, revision }),
+        });
+        await loadMemories();
+        return;
+      }
+      if(action==='purge'){
+        if(!await NovaMindUI.dialogForm({title:'清除这条记忆的正文？',description:'清理记忆正文、索引及本应用可控旧画像备份中的该段内容。普通聊天历史不会删除。',submit:'清除正文',danger:true}))return;
+        await fetchJson('/personal/memories/'+encodeURIComponent(memoryId)+'/purge',{method:'POST'});
+        await loadMemories();return;
+      }
+      if (action === 'delete') {
+        if(!await NovaMindUI.dialogForm({title:'删除这条记忆？',description:'停止使用并阻止后台抽取恢复这条记忆。',submit:'删除记忆',danger:true}))return;
+        await fetchJson('/memories/' + encodeURIComponent(memoryId), { method: 'DELETE' });
+      } else {
+        await fetchJson('/memories/' + encodeURIComponent(memoryId) + '/' + action, {
+          method: 'POST',
+        });
+      }
+      await loadMemories();
+    } catch (e) {
+      NovaMindControls.notify('操作失败：' + e.message);
+    }
+  }
+
+  const mirroredTurns=new Map();
+  function paintMirrored(id){if(id===currentId&&currentView==='chat'){renderMessages();refreshRunUI();}renderSessions();}
+  async function reloadMirrored(id){const st=sessionState(id);if(st.running)return;try{const data=await fetchJson('/history/'+encodeURIComponent(id)+'?limit=100');if(st.running)return;st.messages=(data.messages||[]).concat(st.messages.filter(m=>m.unpersisted));st.historyLoaded=true;st.historyCursor=data.pagination?.next_cursor||null;st.historyHasMore=!!data.pagination?.has_more;paintMirrored(id);}catch(error){flashStatus(error.message);}}
+  function connectConversations(){NovaMindUI.liveConversations(event=>{
+    if(event.kind==='snapshot'){for(const [turnId,entry] of mirroredTurns)if(!event.turns.includes(turnId)){entry.st.running=false;entry.st.remoteTurn=null;entry.ai.live=false;mirroredTurns.delete(turnId);flashStatus('同步已结束；本轮结束状态未确认，正在核对历史');reloadMirrored(entry.id);}return;}
+    if(event.kind==='history'){loadSessions(true).then(()=>{if(currentId===event.thread_id)reloadMirrored(event.thread_id);});return;}
+    const id=event.thread_id;
+    if(event.kind==='start'){
+      if(mirroredTurns.has(event.turn_id)&&!event.frames)return;
+      const st=sessionState(id);if(st.running&&!st.remoteTurn)return;
+      const needsHistory=!st.historyLoaded;
+      st.messages=st.messages.filter(m=>m.liveTurn!==event.turn_id&&!m.unpersisted);
+      let session=sessions.find(s=>s.threadId===id);if(!session){session={id,threadId:id,title:event.message?.slice(0,24)||'图片对话',isDraft:false};sessions.unshift(session);}
+      const user={role:'user',content:event.message||'',images:event.images||[],tools:[],liveTurn:event.turn_id};
+      const ai={role:'ai',content:'',tools:[],memories:[],schedules:[],live:true,liveTurn:event.turn_id,syncTruncated:!!event.truncated,note:event.truncated?'同步内容不完整，较早内容已省略。完成后会从历史校正。':''};
+      st.messages.push(user,ai);st.running=true;st.remoteTurn=event.turn_id;st.historyLoaded=true;mirroredTurns.set(event.turn_id,{id,st,ai});
+      if(needsHistory)fetchJson('/history/'+encodeURIComponent(id)+'?limit=100').then(data=>{if(st.running&&st.remoteTurn===event.turn_id){st.messages=(data.messages||[]).concat(st.messages.filter(m=>m.liveTurn===event.turn_id));st.historyCursor=data.pagination?.next_cursor||null;st.historyHasMore=!!data.pagination?.has_more;paintMirrored(id);}}).catch(()=>{});
+      if(currentView==='chat'&&currentId!==id&&(!currentId||!sessionState(currentId).messages.length)&&!input.value.trim()&&!imageComposer.items.length)switchTo(id);
+      paintMirrored(id);
+    }else if(event.kind==='frame'){
+      const entry=mirroredTurns.get(event.turn_id);if(!entry)return;const frame=event.frame;
+      if(frame.type==='text')entry.ai.content+=frame.content;
+      if(frame.type==='tool')entry.ai.tools.push(frame.name);
+      if(frame.type==='memories')entry.ai.memories=frame.items||[];
+      if(frame.type==='schedules')entry.ai.schedules=frame.items||[];
+      if(frame.type==='error'){entry.ai.syncError=frame.message||'回答未能完成，请重试';entry.ai.note=[entry.ai.syncError,entry.ai.syncTruncated?'同步内容不完整，较早内容已省略。':''].filter(Boolean).join(' · ');}
+      paintMirrored(id);
+    }else if(event.kind==='finish'){
+      const entry=mirroredTurns.get(event.turn_id);if(!entry)return;entry.st.running=false;entry.st.remoteTurn=null;entry.ai.live=false;const failed=!!event.error||!!entry.ai.syncError;entry.ai.note=[entry.ai.syncError||(failed?'回答未能完成，请重试':event.cancelled?'已停止':''),entry.ai.syncTruncated?'同步内容不完整，较早内容已省略。':''].filter(Boolean).join(' · ');if(event.cancelled||failed)entry.st.messages.filter(m=>m.liveTurn===event.turn_id).forEach(m=>m.unpersisted=true);mirroredTurns.delete(event.turn_id);paintMirrored(id);loadSessions(true);if(!event.cancelled&&!failed)reloadMirrored(id);
+    }
+  });}
+  loadSessions().finally(() => {
+    const view=new URLSearchParams(location.search).get('view');
+    if(['settings','schedule'].includes(view))switchView(view);
+    connectConversations();
+  });
 })();
 
 </script>
-<script src="workspace.js?v=20260909"></script>
+<script src="theme.js?v=20261023chrome1"></script>
+<script src="workspace.js?v=20261022ui3"></script>
 </body>
 </html>

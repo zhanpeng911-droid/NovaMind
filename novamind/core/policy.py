@@ -30,6 +30,8 @@ DEFAULT_POLICY: dict[str, Any] = {
         "list_office_files",
         "read_office_file",
         "load_skill",
+        "correct_memory",
+        "forget_memory",
         "write_office_file",
         "execute_office_shell",
     ],

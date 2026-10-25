@@ -41,6 +41,7 @@ dependencies = [
     "openai>=1.0.0",
     "anthropic>=0.18.0",
     "pydantic>=2.0.0",
+    "Pillow>=13.0.0,<14",
 ]
 
 [project.optional-dependencies]
@@ -66,6 +67,21 @@ include = ["novamind*", "entry*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# jieba 0.42.1 publishes no Requires-Dist/Requires-Python (official PyPI JSON
+# and the installed distribution agree). Static, version-scoped metadata lets
+# uv resolve security patch updates with --no-build, without running setup.py.
+[[tool.uv.dependency-metadata]]
+name = "jieba"
+version = "0.42.1"
+requires-dist = []
+
+# proxy-tools 0.1.0 likewise has no distribution requirements, confirmed
+# against official PyPI metadata and its installed METADATA.
+[[tool.uv.dependency-metadata]]
+name = "proxy-tools"
+version = "0.1.0"
+requires-dist = []
 
 [tool.ruff]
 line-length = 100

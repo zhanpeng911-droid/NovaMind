@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>NovaMind 助手</title>
+  <link rel="stylesheet" href="theme.css?v=20261022ui3"><link rel="stylesheet" href="desktop.css?v=20261022ui3"><link rel="stylesheet" href="controls.css?v=20261024polish1"><link rel="stylesheet" href="markdown.css?v=20261023md1">
+</head>
+<body>
+<div class="desktop-card quick-shell">
+  <header class="desktop-head pywebview-drag-region">
+    <img class="brand-mark pywebview-drag-region" src="nova-mark.svg" alt=""><strong class="pywebview-drag-region">NovaMind</strong>
+    <span class="push quick-caption" id="hint">随时一起完成</span>
+    <button id="new-chat" aria-label="新会话" title="新会话"><span data-icon="plus"></span></button>
+    <button id="escalate" aria-label="在完整工作台继续" title="在工作台继续"><span data-icon="window"></span></button>
+    <button id="close" aria-label="收起助手" title="收起 · Esc"><span data-icon="close"></span></button>
+  </header>
+  <div id="messages" class="quick-log" aria-live="polite"><div class="quick-empty"><span class="quick-eyebrow">YOUR EVERYDAY COMPANION</span><h2>有什么想一起完成的？</h2><p>问一个问题，或粘贴一张图片。</p></div></div>
+  <div class="quick-compose" id="composer">
+    <textarea id="input" placeholder="说说你的想法，或粘贴一张图片…" rows="2" aria-label="向 NovaMind 描述任务"></textarea>
+    <div class="quick-actions">
+      <span id="image-button"></span>
+      <select id="action" aria-label="当前模式"><option value="chat">助手对话</option><option value="translate">翻译</option><option value="explain">解释</option><option value="summarize">总结</option><option value="record">记录日程</option></select>
+      <details class="nm-disclosure open-up quick-options"><summary aria-label="对话选项" title="记忆与语言选项"><span data-icon="settings"></span></summary>
+        <div class="nm-popover"><h4>当前对话</h4>
+          <label id="target-field" hidden>翻译成<select id="target" aria-label="目标语言"><option>中文</option><option>English</option><option>日本語</option></select></label>
+          <label>记忆模式<select id="memory-mode" aria-label="记忆模式"><option value="normal">个人记忆</option><option value="no_record">本次不记录</option><option value="private">私密：不读不写</option></select></label>
+          <label>项目范围<input id="scope" aria-label="记忆范围" title="global 为个人偏好，也可填写项目名" placeholder="范围：global" value="global" maxlength="120"></label>
+          <label id="quick-reasoning">思考程度</label>
+          <button type="button" id="personal-methods">个人方法 · 前往工作台审阅</button>
+        </div>
+      </details>
+      <span class="push"></span>
+      <button id="stop" disabled aria-label="停止回答" title="停止回答"><span class="stop-square"></span></button>
+      <button id="send" aria-label="发送" title="发送 · Enter"><span data-icon="arrow"></span></button>
+    </div>
+  </div>
+  <div class="quick-foot"><span id="state" role="status">Enter 发送 · Shift + Enter 换行</span><button id="copy" title="复制最新回答" hidden><span data-icon="copy"></span>复制回答</button></div>
+</div>
+<link rel="stylesheet" href="learning.css?v=20261024learn1">
+<script src="vendor/markdown-it-15.0.3.min.js"></script><script src="markdown.js?v=20261023md1"></script><script src="ui_common.js?v=20261024polish1"></script><script src="theme.js?v=20261023chrome1"></script><script src="controls.js?v=20261024polish1"></script><script src="learning_ui.js?v=20261024learn1"></script><script src="quick.js?v=20261024learn1"></script>
+</body></html>

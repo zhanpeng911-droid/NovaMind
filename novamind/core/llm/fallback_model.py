@@ -70,13 +70,16 @@ class FallbackChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         last_exc: Exception | None = None
+        from ..reasoning import invocation_options
+        effort = kwargs.pop("novamind_effort", None)
         n = len(self.models)
         start = self._snapshot_active()
         for offset in range(n):
             idx = (start + offset) % n
             try:
                 # 用 invoke 兼容 BaseChatModel 与 bind_tools 后的 RunnableBinding
-                ai: AIMessage = self.models[idx].invoke(messages, stop=stop, **kwargs)
+                options = {**kwargs, **(invocation_options(self.models[idx], effort) if effort else {})}
+                ai: AIMessage = self.models[idx].invoke(messages, stop=stop, **options)
                 self._store_active(idx)
                 return ChatResult(generations=[ChatGeneration(message=ai)])
             except Exception as exc:
@@ -96,12 +99,15 @@ class FallbackChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         last_exc: Exception | None = None
+        from ..reasoning import invocation_options
+        effort = kwargs.pop("novamind_effort", None)
         n = len(self.models)
         start = self._snapshot_active()
         for offset in range(n):
             idx = (start + offset) % n
             try:
-                ai: AIMessage = await self.models[idx].ainvoke(messages, stop=stop, **kwargs)
+                options = {**kwargs, **(invocation_options(self.models[idx], effort) if effort else {})}
+                ai: AIMessage = await self.models[idx].ainvoke(messages, stop=stop, **options)
                 self._store_active(idx)
                 return ChatResult(generations=[ChatGeneration(message=ai)])
             except Exception as exc:

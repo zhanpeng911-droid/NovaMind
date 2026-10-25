@@ -59,6 +59,9 @@ class FakeLLM:
             return resp
         return AIMessage(content="[FakeLLM default]")
 
+    async def ainvoke(self, messages, **kwargs):
+        return self.invoke(messages, **kwargs)
+
     @property
     def call_count(self) -> int:
         return self._call_count

@@ -29,10 +29,20 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 from novamind.core.config import LOG_DIR
+from novamind.core.logger import AuditLogger
 from novamind.core.state_machine import ConversationStore
+from langchain_core.messages import HumanMessage
+from novamind.core.memory.config import get_memory_config, set_memory_config
+from novamind.core.memory.governance import (
+    GovernanceConflictError,
+    GovernanceError,
+    GovernancePermissionError,
+    MemoryState,
+)
+from novamind.core.memory.governance_runtime import get_governance_service
 from novamind.webui.api_models import (
     DeleteResponse,
     DoctorResponse,
@@ -40,9 +50,22 @@ from novamind.webui.api_models import (
     HealthResponse,
     HistoryResponse,
     InvalidCursorError,
+    MemoriesResponse,
+    MemoryActionResponse,
+    MemoryDetailResponse,
+    MemoryEditRequest,
+    MemoryItem,
+    MemoryRevisionItem,
+    MemorySettings,
+    MemorySettingsUpdate,
     MonitorEventsResponse,
     MonitorSessionsResponse,
     PaginationMeta,
+    QuickAck,
+    QuickActionRequest,
+    QuickEscalateRequest,
+    QuickEscalateResponse,
+    QuickSelectionRequest,
     SessionsResponse,
     SkillEnabledRequest,
     SkillEnabledResponse,
@@ -52,6 +75,9 @@ from novamind.webui.api_models import (
     encode_cursor,
     encode_monitor_events_cursor,
 )
+from novamind.webui.personal_routes import router as personal_router
+from novamind.webui.learning_routes import router as learning_router
+from novamind.webui.application_info import get_application_info
 from novamind.webui.runtime import WebRuntime
 
 logger = logging.getLogger("novamind.webui")
@@ -170,8 +196,21 @@ def _sse(payload: dict) -> str:
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = ""
     thread_id: str | None = None
+    images: list[str] = Field(default_factory=list, max_length=3)
+    memory_mode: str = Field(default="normal", pattern="^(normal|no_record|private)$")
+    scope: str = Field(default="global", min_length=1, max_length=120)
+    style: str = ""
+    reasoning: str = Field(default="auto", pattern="^(auto|quick|low|high|max)$")
+    client_id: str = Field(default="", max_length=64)
+    source: str = Field(default="workspace", pattern="^(workspace|quick)$")
+
+    @model_validator(mode="after")
+    def nonempty_turn(self):
+        if not self.message.strip() and not self.images:
+            raise ValueError("请先输入文字或添加图片")
+        return self
 
 
 class _BodyTooLargeError(Exception):
@@ -208,10 +247,11 @@ class BodyLimitMiddleware:
                                        "/chat 只接受 JSON 请求体")
                 return
 
+        limit = 10 * 1024 * 1024 if path == "/attachments/images" else self.limit
         content_length = headers.get("content-length", "")
-        if content_length.isdigit() and int(content_length) > self.limit:
+        if content_length.isdigit() and int(content_length) > limit:
             await self._send_error(send, 413, "body_too_large",
-                                   f"请求体超过 {self.limit} 字节上限")
+                                   f"请求体超过 {limit} 字节上限")
             return
 
         state = {"size": 0}
@@ -220,7 +260,7 @@ class BodyLimitMiddleware:
             msg = await receive()
             if msg.get("type") == "http.request":
                 state["size"] += len(msg.get("body", b"") or b"")
-                if state["size"] > self.limit:
+                if state["size"] > limit:
                     raise _BodyTooLargeError()
             return msg
 
@@ -228,7 +268,7 @@ class BodyLimitMiddleware:
             await self.app(scope, sized_receive, send)
         except _BodyTooLargeError:
             await self._send_error(send, 413, "body_too_large",
-                                   f"请求体超过 {self.limit} 字节上限")
+                                   f"请求体超过 {limit} 字节上限")
 
     async def _send_error(self, send: Any, status: int, code: str, message: str) -> None:
         body = json.dumps({
@@ -266,6 +306,10 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(title="NovaMind WebUI", lifespan=_lifespan)
 app.add_middleware(BodyLimitMiddleware, limit=_BODY_LIMIT)
+# A0 本机安全基线：Host/Origin 白名单 + 会话令牌（默认关闭，桌面 Shell 启动时启用）
+from novamind.webui.local_guard import LocalGuardMiddleware  # noqa: E402
+
+app.add_middleware(LocalGuardMiddleware)
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -302,7 +346,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 _ERROR_DESCRIPTIONS = {
     400: "非法游标（invalid_cursor）",
+    403: "权限不足或本机会话校验失败",
     404: "资源不存在",
+    409: "并发冲突（revision 前置检查失败）",
     413: "请求体过大",
     415: "媒体类型不支持",
     422: "字段验证失败",
@@ -339,15 +385,29 @@ async def chat(request: ChatRequest) -> StreamingResponse:
 
 
 async def _stream_chat(request: ChatRequest) -> AsyncIterator[str]:
+    from novamind.core.personal import request_context
+    from novamind.core.images import message_content
     runtime = get_runtime()
     thread_id = request.thread_id or f"gui_{uuid.uuid4().hex[:12]}"
-    yield _sse({"type": "thread", "thread_id": thread_id})
+    turn_id = uuid.uuid4().hex
+    live = {"thread_id": thread_id, "turn_id": turn_id, "client_id": request.client_id, "source": request.source}
+    runtime.live.publish({**live, "kind": "start", "message": request.message, "images": request.images})
+
+    def emit(frame):
+        runtime.live.publish({**live, "kind": "frame", "frame": frame})
+        return _sse(frame)
 
     task = asyncio.current_task()
     runtime.register_task(task)
+    runtime.live.tasks[turn_id] = task
+    context_token = request_context.set({"memory_mode": request.memory_mode, "scope": request.scope,
+                                         "style": request.style, "text": request.message,
+                                         "thread_id": thread_id, "turn_id": turn_id,
+                                         "reasoning": request.reasoning})
     gen = None
     stream_error: dict | None = None
     try:
+        yield emit({"type": "thread", "thread_id": thread_id})
         # Phase 5：移除全局 chat 锁——先拿容量许可，正确性由 Agent 的
         # per-thread 协调器保证（同 thread 串行，跨 thread 并发）。
         async with runtime.capacity:
@@ -356,7 +416,8 @@ async def _stream_chat(request: ChatRequest) -> AsyncIterator[str]:
                 await agent_or_coro if asyncio.iscoroutine(agent_or_coro)
                 else agent_or_coro
             )
-            gen = agent.astream(request.message, thread_id=thread_id)
+            content = message_content(request.message, request.images)
+            gen = agent.astream(content, thread_id=thread_id)
             async for event in gen:
                 for node_name, node_data in event.items():
                     if node_name == "agent":
@@ -372,24 +433,36 @@ async def _stream_chat(request: ChatRequest) -> AsyncIterator[str]:
                                     if isinstance(tc, dict)
                                     else getattr(tc, "name", "?")
                                 )
-                                yield _sse({"type": "tool", "name": name})
+                                yield emit({"type": "tool", "name": name})
                         else:
                             content = _content_str(getattr(last, "content", ""))
                             if content:
-                                yield _sse({"type": "text", "content": content})
+                                yield emit({"type": "text", "content": content})
                     elif node_name == "__limit__":
-                        yield _sse({"type": "limit"})
-    except asyncio.CancelledError:
+                        yield emit({"type": "limit"})
+                    elif node_name == "tools":
+                        from novamind.core.schedules import list_tasks
+                        from novamind.core.personal import request_context
+                        created = [t for t in await asyncio.to_thread(list_tasks)
+                                   if t.get("source_id") == request_context.get().get("turn_id")]
+                        if created:
+                            yield emit({"type": "schedules", "items": created})
+            if hasattr(agent, "personal_usage"):
+                yield emit({"type": "memories", "items": agent.personal_usage(thread_id)})
+    except (asyncio.CancelledError, GeneratorExit):
         # 断连/停机：显式处理并 re-raise；finally 的 aclose 会取消本轮并
         # 回滚半轮状态，不向已死连接写 done。
+        runtime.live.publish({**live, "kind": "finish", "cancelled": True})
         raise
-    except Exception:
+    except Exception as exc:
         request_id = uuid.uuid4().hex
         logger.exception("chat stream failed (request_id=%s)", request_id)
+        from novamind.webui.failure_notes import failure_note
+        code, note = failure_note(exc, has_images=bool(request.images))
         # 只发稳定信息，不泄露 provider/路径等内部细节（完整 traceback 留在服务端日志）
         stream_error = {
-            "type": "error", "code": "internal_error",
-            "message": "服务器处理失败，请稍后重试",
+            "type": "error", "code": code,
+            "message": note,
             "request_id": request_id,
         }
     finally:
@@ -399,12 +472,52 @@ async def _stream_chat(request: ChatRequest) -> AsyncIterator[str]:
             with contextlib.suppress(Exception):
                 await gen.aclose()
         runtime.unregister_task(task)
+        request_context.reset(context_token)
 
     # 只有正常路径到达这里（取消/断连已在上方 re-raise）。
     # done 只在正常完成时发：普通运行错误先发 error 再发 done。
-    if stream_error is not None:
-        yield _sse(stream_error)
-    yield _sse({"type": "done"})
+    try:
+        if stream_error is not None:
+            from novamind.core.personal import report_turn
+            report_turn("error", stream_error["message"])
+            yield emit(stream_error)
+        else:
+            from novamind.core.personal import report_turn
+            report_turn("completed", "任务已完成，打开助手查看结果")
+        yield emit({"type": "done"})
+    finally:
+        # Closing at the final error/done yield must not leave a phantom live turn.
+        runtime.live.publish({**live, "kind": "finish", "error": stream_error is not None})
+
+
+@app.get("/workspace/events", response_class=StreamingResponse,
+         responses={200: {"content": {"text/event-stream": {"schema": {"type": "string"}}}}})
+async def workspace_events(request: Request):
+    runtime = get_runtime()
+
+    async def stream():
+        queue, active = runtime.live.subscribe()
+        try:
+            yield _sse({"kind": "snapshot", "turns": active})
+            while not await request.is_disconnected():
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15)
+                    yield _sse(event)
+                except TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            runtime.live.unsubscribe(queue)
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/workspace/turns/{turn_id}/cancel", response_model=QuickAck)
+async def cancel_workspace_turn(turn_id: str):
+    task = get_runtime().live.tasks.get(turn_id)
+    if task is not None and not task.done():
+        task.cancel()
+    return QuickAck(status="ok")
 
 
 @app.get("/health", response_model=HealthResponse, response_model_exclude_none=True)
@@ -418,10 +531,10 @@ async def doctor():
     try:
         from novamind.core.doctor import run_doctor
 
-        return run_doctor().as_dict()
+        report = run_doctor().as_dict()
     except Exception:
         logger.exception("doctor failed")
-        return {
+        report = {
             "ok": False,
             "counts": {"error": 1, "warning": 0, "info": 0},
             "findings": [{
@@ -431,6 +544,8 @@ async def doctor():
                 "suggestion": "Check the server log for the full traceback.",
             }],
         }
+    # Identity remains available even if a health check itself fails.
+    return {**report, "application": get_application_info()}
 
 
 def _pagination(limit: int, page: list, next_cursor: str | None) -> PaginationMeta:
@@ -698,6 +813,11 @@ async def get_history(thread_id: str, limit: int | None = None,
     # 存储故障不再伪装 200 空数组：向上传播由全局 handler 返回 500
     # （未知 thread 本身不抛错，仍返回 200 空列表）
 
+    from novamind.core.images import image_ids
+    from novamind.core.schedules import list_tasks as scheduled_items
+    tasks_by_id = {t["id"]: t for t in await asyncio.to_thread(scheduled_items)}
+    from novamind.core.memory.governance_runtime import get_governance_service
+    governance = get_governance_service()
     items: list[dict] = []
     for m in msgs:
         role = getattr(m, "type", "")
@@ -713,6 +833,11 @@ async def get_history(thread_id: str, limit: int | None = None,
             "role": "user" if role == "human" else "ai",
             "content": content,
             "tools": tools,
+            "images": image_ids(m.content),
+            "memories": [{"id": mid, "content": content} for mid in m.additional_kwargs.get("novamind_memories", [])
+                         if (content := governance.content_for(mid))],
+            "schedules": [tasks_by_id[tid] for tid in m.additional_kwargs.get("novamind_schedules", [])
+                          if tid in tasks_by_id],
         })
     return HistoryResponse(messages=items, pagination=pagination)
 
@@ -734,6 +859,7 @@ async def delete_session(thread_id: str):
             await agent.aclear_conversation(thread_id)
         else:
             await asyncio.to_thread(runtime.get_history_store().clear_thread, thread_id)
+        await asyncio.to_thread(runtime.get_learning().store.revoke_thread, thread_id)
         return DeleteResponse(status="ok")
     except Exception:
         request_id = uuid.uuid4().hex
@@ -743,6 +869,401 @@ async def delete_session(thread_id: str):
 
 
 # 静态文件（前端 index.html）最后挂载，避免拦截 /chat /health
+# ── A1 桌面 Shell 唤醒 ─────────────────────────────────────────────────
+
+_wake_handler: Any = None
+
+
+def register_wake_handler(handler: Any) -> None:
+    """桌面 Shell 注册唤醒回调（同一进程内）；二次启动经 /shell/wake 触发。"""
+    global _wake_handler
+    _wake_handler = handler
+
+
+@app.post("/shell/wake", response_model=QuickAck)
+async def shell_wake():
+    handler = _wake_handler
+    if handler is None:
+        return _error_response(503, "shell_unavailable", "桌面 Shell 未运行")
+    try:
+        await asyncio.to_thread(handler)
+    except Exception:
+        request_id = uuid.uuid4().hex
+        logger.exception("shell wake failed (request_id=%s)", request_id)
+        return _error_response(500, "shell_wake_failed",
+                               "唤醒桌面面板失败，请稍后重试", request_id)
+    return QuickAck(status="ok")
+
+
+# ── A2 Quick Actions ───────────────────────────────────────────────────
+
+
+def _quick_audit(event: str, **fields) -> None:
+    """Quick 审计：只记元数据，不记选中/输入原文。"""
+    try:
+        AuditLogger().log_event(thread_id="quick", event=event, **fields)
+    except Exception:  # pragma: no cover - 审计失败不影响主流程
+        logger.exception("quick audit failed")
+
+
+def _quick_preferences(text: str) -> list[str]:
+    try:
+        from novamind.core.memory.governance_runtime import get_governance_service
+
+        return get_governance_service().recall_preferences(text, top_k=3)
+    except Exception:
+        return []
+
+
+@app.post("/quick/open", response_model=QuickAck)
+async def quick_open():
+    _quick_audit("quick.open")
+    return QuickAck(status="ok")
+
+
+@app.post("/quick/selection", response_model=QuickAck)
+async def quick_selection(req: QuickSelectionRequest):
+    _quick_audit(
+        "selection.capture", captured=req.captured, chars=req.chars,
+        source_app=req.source_app or "",
+    )
+    return QuickAck(status="ok")
+
+
+@app.post("/quick/actions")
+async def quick_action(req: QuickActionRequest, request: Request):
+    """轻量动作：单次模型调用，不绑定工具，SSE 流式返回。"""
+    runtime = get_runtime()
+    if runtime.closing:
+        return _error_response(503, "server_closing", "服务正在关闭，请稍后重试")
+    try:
+        llm = await runtime.get_quick_llm()
+    except Exception:
+        request_id = uuid.uuid4().hex
+        logger.exception("quick llm init failed (request_id=%s)", request_id)
+        return _error_response(500, "quick_llm_unavailable",
+                               "模型暂不可用，请稍后重试", request_id)
+
+    from novamind.webui.quick_actions import QuickActionError, QuickActionService
+
+    service = QuickActionService(llm, preferences=_quick_preferences)
+    _quick_audit(
+        "quick.request", action=req.action, text_chars=len(req.text),
+        target_language=req.target_language or "",
+    )
+
+    async def limited_stream():
+        from novamind.core.personal import request_context
+        task = asyncio.current_task()
+        runtime.register_task(task)
+        token = request_context.set({"memory_mode": req.memory_mode, "scope": req.scope,
+                                     "reasoning": req.reasoning, "text": req.text})
+        try:
+            async with runtime.capacity:
+                async for chunk in service.stream(req.action, req.text, target_language=req.target_language,
+                                                  style=req.style, images=req.images):
+                    yield chunk
+        finally:
+            request_context.reset(token)
+            runtime.unregister_task(task)
+
+    async def event_stream():
+        source = limited_stream()
+        try:
+            async for chunk in source:
+                if await request.is_disconnected():
+                    _quick_audit("quick.cancel", action=req.action,
+                                 reason="client_disconnected")
+                    return
+                yield "data: " + json.dumps(
+                    {"type": "text", "content": chunk}, ensure_ascii=False
+                ) + "\n\n"
+            from novamind.core.personal import report_turn
+            report_turn("completed", "快捷任务已完成，打开助手查看结果")
+            yield "data: " + json.dumps({"type": "done"}, ensure_ascii=False) + "\n\n"
+        except QuickActionError as exc:
+            from novamind.core.personal import report_turn
+            report_turn("error", str(exc))
+            yield "data: " + json.dumps(
+                {"type": "error", "code": "quick_invalid",
+                 "message": str(exc)}, ensure_ascii=False
+            ) + "\n\n"
+        except asyncio.CancelledError:
+            _quick_audit("quick.cancel", action=req.action, reason="cancelled")
+            raise
+        except Exception as exc:
+            request_id = uuid.uuid4().hex
+            logger.exception("quick action failed (request_id=%s)", request_id)
+            from novamind.webui.failure_notes import failure_note
+            code, note = failure_note(exc, has_images=bool(req.images), fallback_code="quick_failed")
+            from novamind.core.personal import report_turn
+            report_turn("error", "快捷任务失败，请打开助手查看")
+            _quick_audit("quick.cancel", action=req.action, reason="error")
+            yield "data: " + json.dumps(
+                {"type": "error", "code": code,
+                 "message": note, "request_id": request_id},
+                ensure_ascii=False,
+            ) + "\n\n"
+
+        finally:
+            with contextlib.suppress(Exception):
+                await source.aclose()
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/quick/escalate", response_model=QuickEscalateResponse)
+async def quick_escalate(req: QuickEscalateRequest):
+    """把 Quick 输入升级为完整 Agent 会话（保留显式授权文本与会话 ID）。"""
+    runtime = get_runtime()
+    import hashlib
+    key = req.request_id or uuid.uuid4().hex
+    thread_id = req.session_id or "quick_" + hashlib.sha256(key.encode()).hexdigest()[:20]
+    from novamind.core.images import message_content
+    from langchain_core.messages import AIMessage
+    message = HumanMessage(
+        content=message_content(req.text, req.images), id=f"quick_{key}_user",
+    )
+    try:
+        agent = await runtime.get_agent()
+        messages = [message]
+        if req.answer:
+            messages.append(AIMessage(content=req.answer, id=f"quick_{key}_ai"))
+        await agent.append_history(thread_id, messages)
+    except Exception:
+        request_id = uuid.uuid4().hex
+        logger.exception("quick escalate failed (request_id=%s)", request_id)
+        return _error_response(500, "quick_escalate_failed",
+                               "转入完整 Agent 失败，请稍后重试", request_id)
+    _quick_audit(
+        "quick.escalate", text_chars=len(req.text), thread_id=thread_id,
+    )
+    runtime.live.publish({"kind": "history", "thread_id": thread_id})
+    return QuickEscalateResponse(
+        thread_id=thread_id, url=f"/?thread={thread_id}",
+    )
+
+
+# ── B1 Memory Center ───────────────────────────────────────────────────
+
+_MEMORY_STATE_VALUES = {s.value for s in MemoryState}
+
+
+def _memory_item(record, service) -> MemoryItem:
+    return MemoryItem(
+        memory_id=record.memory_id,
+        content=service.content_for(record.memory_id),
+        category=record.category,
+        state=record.state.value,
+        revision=record.revision,
+        source_thread_id=record.source_thread_id,
+        source_turn_id=record.source_turn_id,
+        model_proposed=record.model_proposed,
+        user_confirmed=record.user_confirmed,
+        trust_level=record.trust_level,
+        scope=record.scope,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        confirmed_at=record.confirmed_at,
+        superseded_by=record.superseded_by,
+    )
+
+
+@app.get("/memories", response_model=MemoriesResponse,
+         responses=_error_responses(400, 500))
+async def list_memories(
+    state: str | None = None,
+    category: str | None = None,
+    scope: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    exclude_deleted: bool = False,
+):
+    """列出记忆治理视图（正文 + 生命周期状态），支持状态/分类/scope 过滤。"""
+    if state is not None and state not in _MEMORY_STATE_VALUES:
+        return _error_response(400, "invalid_memory_state",
+                               f"未知记忆状态: {state}")
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    try:
+        service = await asyncio.to_thread(get_governance_service)
+        states = [MemoryState(state)] if state else None
+        records = await asyncio.to_thread(
+            service.list_governed, states=states, category=category, scope=scope,
+        )
+        if exclude_deleted:
+            records = [record for record in records if record.state != MemoryState.DELETED]
+        page = records[offset:offset + limit]
+        items = [_memory_item(r, service) for r in page]
+        total = len(records)
+        next_offset = offset + len(page)
+        return MemoriesResponse(
+            memories=items,
+            count=total,
+            pagination=PaginationMeta(
+                limit=limit, count=len(page), has_more=next_offset < total,
+                next_cursor=str(next_offset) if next_offset < total else None,
+            ),
+        )
+    except Exception:
+        request_id = uuid.uuid4().hex
+        logger.exception("list memories failed (request_id=%s)", request_id)
+        return _error_response(500, "memory_list_failed",
+                               "记忆库暂不可用，请稍后重试", request_id)
+
+
+@app.get("/memories/{memory_id}", response_model=MemoryDetailResponse,
+         responses=_error_responses(404, 500))
+async def get_memory(memory_id: str):
+    try:
+        service = await asyncio.to_thread(get_governance_service)
+        record = await asyncio.to_thread(service.store.get, memory_id)
+        if record is None:
+            return _error_response(404, "memory_not_found", "记忆不存在")
+        item = _memory_item(record, service)
+        revisions = [
+            MemoryRevisionItem(**r)
+            for r in await asyncio.to_thread(service.revisions_for, memory_id)
+        ]
+        return MemoryDetailResponse(**item.model_dump(), revisions=revisions)
+    except Exception:
+        request_id = uuid.uuid4().hex
+        logger.exception("get memory failed (request_id=%s)", request_id)
+        return _error_response(500, "memory_get_failed",
+                               "记忆库暂不可用，请稍后重试", request_id)
+
+
+@app.post("/memories/{memory_id}/confirm", response_model=MemoryActionResponse,
+          responses=_error_responses(403, 404, 409))
+async def confirm_memory(memory_id: str, force: bool = False):
+    return await _memory_action(
+        lambda service: service.confirm(memory_id, force=force),
+        "记忆确认失败",
+    )
+
+
+@app.post("/memories/{memory_id}/reject", response_model=MemoryActionResponse,
+          responses=_error_responses(404, 409))
+async def reject_memory(memory_id: str):
+    return await _memory_action(
+        lambda service: service.reject(memory_id), "记忆拒绝失败",
+    )
+
+
+@app.post("/memories/{memory_id}/disable", response_model=MemoryActionResponse,
+          responses=_error_responses(404, 409))
+async def disable_memory(memory_id: str):
+    return await _memory_action(
+        lambda service: service.disable(memory_id), "记忆禁用失败",
+    )
+
+
+@app.post("/memories/{memory_id}/enable", response_model=MemoryActionResponse,
+          responses=_error_responses(404, 409))
+async def enable_memory(memory_id: str):
+    return await _memory_action(
+        lambda service: service.enable(memory_id), "记忆启用失败",
+    )
+
+
+@app.delete("/memories/{memory_id}", response_model=DeleteResponse,
+            responses=_error_responses(404, 409))
+async def delete_memory(memory_id: str):
+    try:
+        service = await asyncio.to_thread(get_governance_service)
+        await asyncio.to_thread(service.delete, memory_id)
+        await asyncio.to_thread(get_runtime().get_learning().store.revoke_memory, memory_id)
+        return DeleteResponse(status="ok")
+    except GovernanceError as exc:
+        return _error_response(404, "memory_delete_failed", str(exc))
+    except Exception:
+        request_id = uuid.uuid4().hex
+        logger.exception("delete memory failed (request_id=%s)", request_id)
+        return _error_response(500, "memory_delete_failed",
+                               "删除记忆失败，请稍后重试", request_id)
+
+
+@app.patch("/memories/{memory_id}", response_model=MemoryActionResponse,
+           responses=_error_responses(400, 403, 404, 409))
+async def edit_memory(memory_id: str, req: MemoryEditRequest):
+    def _edit(service):
+        if req.content is not None:
+            return service.update_content(
+                memory_id, req.content,
+                expected_revision=req.revision,
+                category=req.category, scope=req.scope,
+            )
+        return service.update_metadata(
+            memory_id, expected_revision=req.revision,
+            category=req.category, scope=req.scope,
+        )
+
+    return await _memory_action(_edit, "记忆编辑失败")
+
+
+async def _memory_action(action, fallback_message: str) -> MemoryActionResponse:
+    try:
+        service = await asyncio.to_thread(get_governance_service)
+        record = await asyncio.to_thread(action, service)
+        if record.state.value in {"disabled", "deleted", "rejected"} or record.superseded_by:
+            await asyncio.to_thread(get_runtime().get_learning().store.revoke_memory, record.memory_id)
+        return MemoryActionResponse(
+            memory_id=record.memory_id, state=record.state.value,
+            revision=record.revision,
+        )
+    except GovernancePermissionError as exc:
+        return _error_response(403, "memory_untrusted", str(exc))
+    except GovernanceConflictError as exc:
+        return _error_response(409, "memory_revision_conflict", str(exc))
+    except GovernanceError as exc:
+        return _error_response(404, "memory_not_found", str(exc))
+    except Exception:
+        request_id = uuid.uuid4().hex
+        logger.exception("memory action failed (request_id=%s)", request_id)
+        return _error_response(500, "memory_action_failed",
+                               fallback_message, request_id)
+
+
+@app.get("/settings/memory", response_model=MemorySettings)
+async def get_memory_settings():
+    cfg = get_memory_config()
+    return MemorySettings(
+        enabled=cfg.use != "off",
+        recall_enabled=cfg.enable_recall,
+        auto_extract=cfg.enable_auto_extract,
+        token_budget=cfg.token_budget,
+    )
+
+
+@app.put("/settings/memory", response_model=MemorySettings,
+         responses=_error_responses(400))
+async def update_memory_settings(req: MemorySettingsUpdate):
+    from dataclasses import replace as _replace
+
+    cfg = get_memory_config()
+    updates: dict[str, Any] = {}
+    if req.recall_enabled is not None:
+        updates["enable_recall"] = req.recall_enabled
+    if req.auto_extract is not None:
+        updates["enable_auto_extract"] = req.auto_extract
+    if req.token_budget is not None:
+        updates["token_budget"] = max(100, min(20_000, req.token_budget))
+    new_cfg = _replace(cfg, **updates)
+    set_memory_config(new_cfg)
+    from novamind.core.personal import update_settings
+    update_settings("memory", {"recall_enabled": new_cfg.enable_recall,
+                               "auto_extract": new_cfg.enable_auto_extract,
+                               "token_budget": new_cfg.token_budget})
+    return MemorySettings(
+        enabled=new_cfg.use != "off",
+        recall_enabled=new_cfg.enable_recall,
+        auto_extract=new_cfg.enable_auto_extract,
+        token_budget=new_cfg.token_budget,
+    )
+
+
+app.include_router(personal_router)
+app.include_router(learning_router)
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
 
 

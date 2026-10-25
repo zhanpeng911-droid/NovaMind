@@ -47,14 +47,24 @@ def _wait_for_server(url: str, timeout: float = 5.0) -> None:
     raise TimeoutError(f"NovaMind 后端在 {timeout}s 内未就绪")
 
 
-def _start_server(host: str, port: int):
-    """后台线程启动 uvicorn，返回 server（可设 should_exit 停止）。"""
+def _start_server(host: str, port: int, *, local_guard: bool = False):
+    """后台线程启动 uvicorn，返回 server（可设 should_exit 停止）。
+
+    local_guard=True 时启用本机 API 守卫（Host/Origin + 会话令牌）。
+    默认关闭，避免测试/嵌入式调用污染全局环境。"""
     _require_loopback_host(host)
+    if local_guard:
+        from novamind.webui.local_guard import set_local_guard_enabled
+
+        set_local_guard_enabled(True)
     from novamind.webui.server import app
 
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    # Windowed executables have no TTY (sys.stdout may be None).
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning", use_colors=False)
     server = uvicorn.Server(config)
-    threading.Thread(target=server.run, daemon=True).start()
+    thread = threading.Thread(target=server.run, daemon=True, name="novamind-web-server")
+    server.novamind_thread = thread
+    thread.start()
     return server
 
 
@@ -66,14 +76,21 @@ def _format_url(host: str, port: int) -> str:
     return f"http://{host_for_url}:{port}"
 
 
-def _find_available_url(host: str, port: int, max_tries: int = 10):
+def _find_available_url(host: str, port: int, max_tries: int = 10, *, local_guard: bool = False):
     """端口冲突时自动顺延，返回 (server, url)。"""
     for offset in range(max_tries):
         candidate_port = port + offset
-        server = _start_server(host, candidate_port)
+        # 仅在需要时传 local_guard，保持旧调用签名兼容（测试/嵌入方 mock）
+        if local_guard:
+            server = _start_server(host, candidate_port, local_guard=True)
+        else:
+            server = _start_server(host, candidate_port)
         url = _format_url(host, candidate_port)
         try:
             _wait_for_server(url, timeout=3.0)
+            if not server.started:
+                # An unrelated service can also answer /health on an occupied port.
+                raise TimeoutError("该端口的健康响应不是本次启动的后端")
             return server, url
         except TimeoutError:
             server.should_exit = True
@@ -83,7 +100,7 @@ def _find_available_url(host: str, port: int, max_tries: int = 10):
 def run_gui(host: str = "127.0.0.1", port: int = 8765, debug: bool = False) -> None:
     """启动桌面窗口：后台 uvicorn + 前台 pywebview，失败降级到浏览器。"""
     _require_loopback_host(host)
-    server, url = _find_available_url(host, port)
+    server, url = _find_available_url(host, port, local_guard=True)
 
     try:
         webview.create_window(

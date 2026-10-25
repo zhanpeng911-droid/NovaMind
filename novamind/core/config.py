@@ -50,6 +50,7 @@ SCRIPTS_DIR = os.path.join(WORKSPACE_DIR, "scripts")          # 自动化脚本�
 OFFICE_DIR = os.path.join(WORKSPACE_DIR, "office")            # 沙盒工位（唯一允许执行文件操作的空间）
 SKILLS_DIR = os.path.join(OFFICE_DIR, "skills")               # 动态技能插件目录
 SKILL_DB_PATH = os.path.join(WORKSPACE_DIR, "skill_store.sqlite3")  # 三层技能 SQLite 存储
+MEMORY_GOVERNANCE_DB_PATH = os.path.join(WORKSPACE_DIR, "memory_governance.sqlite3")  # 记忆治理索引（生命周期）
 TASKS_FILE = os.path.join(WORKSPACE_DIR, "tasks.json")        # 定时任务队列
 
 # 日志目录

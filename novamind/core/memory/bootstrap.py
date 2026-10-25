@@ -14,8 +14,10 @@ _provider_lock = threading.Lock()
 _memory_provider: Any = None
 
 
-def get_memory_provider() -> Any:
-    """懒加载 + 双检锁。config.use 为空时返 None（记忆禁用）。"""
+def get_memory_provider(force: bool = False) -> Any:
+    """懒加载 + 双检锁。config.use 为空时返 None（记忆禁用）。
+
+    force=True 时即使 config.use 为空也构建（默认运行时栈需要治理能力）。"""
     global _memory_provider
     if _memory_provider is not None:
         return _memory_provider
@@ -23,11 +25,16 @@ def get_memory_provider() -> Any:
         if _memory_provider is not None:
             return _memory_provider
         config = get_memory_config()
-        if not config.use:
+        if not config.use and not force:
             return None
         provider = _load_memory_provider(config)
         _memory_provider = provider
         return provider
+
+
+def get_or_build_memory_provider() -> Any:
+    """默认栈/治理 API 使用：没有 provider 时强制构建并复用同一实例。"""
+    return get_memory_provider(force=True)
 
 
 def reset_memory_provider() -> None:
@@ -43,6 +50,12 @@ def shutdown_memory_provider() -> None:
             if hasattr(_memory_provider, "shutdown"):
                 _memory_provider.shutdown()
             _memory_provider = None
+    try:
+        from .governance_runtime import shutdown_governance_service
+
+        shutdown_governance_service()
+    except Exception:  # pragma: no cover - 关闭阶段不阻断
+        logger.exception("governance shutdown failed")
 
 
 def set_memory_provider(provider: Any) -> None:
@@ -57,7 +70,7 @@ _worker_lock = threading.Lock()
 _memory_worker: Any = None
 
 
-def start_memory_worker(manager: Any, llm: Any) -> Any:
+def start_memory_worker(manager: Any, llm: Any, governance: Any = None) -> Any:
     global _memory_worker
     if _memory_worker is not None:
         return _memory_worker
@@ -66,7 +79,7 @@ def start_memory_worker(manager: Any, llm: Any) -> Any:
     with _worker_lock:
         if _memory_worker is not None:
             return _memory_worker
-        worker = MemoryWorker(manager=manager, llm=llm)
+        worker = MemoryWorker(manager=manager, llm=llm, governance=governance)
         worker.start()
         _memory_worker = worker
         return worker

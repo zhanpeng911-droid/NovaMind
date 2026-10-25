@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -135,6 +136,17 @@ class SQLiteSkillStore:
             self._conn.commit()
 
     # ── 注册 / 发现 ──────────────────────────────────────────
+
+    @contextmanager
+    def learning_transaction(self):
+        """Serialize learning reads/writes with the registry's own transaction.
+
+        Callers must not invoke other store methods while this lock is held.
+        The learning publisher uses this boundary to switch versions atomically.
+        """
+        with self._mu, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            yield self._conn
 
     def register(self, record: SkillRecord) -> str:
         with self._mu:
