@@ -60,3 +60,6 @@ htmlcov/
 # 真实模型压测运行产物（隔离 workspace / 调用日志 / 报告）
 tests/performance/.run/
 .novamind/
+
+# 本地任务书/个人材料（不公开）
+_local/
