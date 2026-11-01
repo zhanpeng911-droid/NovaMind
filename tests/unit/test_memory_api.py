@@ -41,7 +41,16 @@ class TestMemoryCenterAPI(unittest.TestCase):
             mock.patch(
                 "novamind.core.config.MEMORY_GOVERNANCE_DB_PATH",
                 str(self.root / "memory_governance.sqlite3"),
-            )
+            ),
+            # 旧画像迁移会读 PROFILE_PATH；必须一起隔离，否则真实画像被迁入临时库
+            mock.patch(
+                "novamind.core.config.PROFILE_PATH",
+                str(self.root / "user_profile.md"),
+            ),
+            mock.patch(
+                "novamind.core.config.PROFILE_BACKUP_DIR",
+                str(self.root / "profile_backups"),
+            ),
         ]
         for patcher in self.patches:
             patcher.start()
